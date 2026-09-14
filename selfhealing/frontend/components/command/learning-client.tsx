@@ -65,6 +65,64 @@ function MetricBar({ label, value, max }: { label: string; value: number; max: n
   )
 }
 
+function DeltaBadge({ value }: { value: number }) {
+  const positive = value > 0
+  const neutral = value === 0
+  return (
+    <span
+      className={cn(
+        'rounded px-1.5 py-0.5 font-mono text-[11px] font-semibold',
+        neutral
+          ? 'bg-bh-surface-2 text-bh-muted'
+          : positive
+            ? 'bg-bh-success/15 text-bh-success'
+            : 'bg-bh-danger/15 text-bh-danger',
+      )}
+    >
+      {positive ? '+' : ''}
+      {value}
+    </span>
+  )
+}
+
+function BeforeAfterBar({
+  label,
+  before,
+  after,
+}: {
+  label: string
+  before: number
+  after: number
+}) {
+  return (
+    <div>
+      <div className="flex items-baseline justify-between text-xs">
+        <span className="text-bh-muted">{label}</span>
+        <span className="flex items-center gap-2">
+          <span className="font-mono text-bh-muted">{before}%</span>
+          <span className="text-bh-line-strong">→</span>
+          <span className="font-mono font-semibold text-bh-accent-ink">{after}%</span>
+          <DeltaBadge value={after - before} />
+        </span>
+      </div>
+      <div className="mt-1.5 flex items-center gap-1">
+        <div className="h-1.5 flex-1 rounded-full bg-bh-line" aria-hidden="true">
+          <div
+            className="h-1.5 rounded-full bg-bh-faint"
+            style={{ width: `${Math.min(100, before)}%` }}
+          />
+        </div>
+        <div className="h-1.5 flex-1 rounded-full bg-bh-line" aria-hidden="true">
+          <div
+            className="h-1.5 rounded-full bg-bh-accent"
+            style={{ width: `${Math.min(100, after)}%` }}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function LearningClient() {
   const [datasetOpen, setDatasetOpen] = useState(false)
 
@@ -204,6 +262,115 @@ export function LearningClient() {
           )}
         </Card>
       </div>
+
+      {learning.evaluation && (
+        <section aria-label="RL decision policy evaluation">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-widest text-bh-faint">
+                RL Decision Policy · before → after
+              </p>
+              <h2 className="mt-1 text-lg font-bold tracking-tight text-bh-ink">
+                Evaluation harness
+              </h2>
+            </div>
+            <Pill tone="info">synthetic holdout · seeded eval</Pill>
+          </div>
+          <div className="mt-3 grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader
+                icon="asterisk"
+                title="Before → After"
+                hint="same held-out eval split, same reward model"
+              />
+              <div className="space-y-4 px-4 py-4">
+                <BeforeAfterBar
+                  label="Action accuracy"
+                  before={learning.evaluation.before.accuracy}
+                  after={learning.evaluation.after.accuracy}
+                />
+                <BeforeAfterBar
+                  label="Safe decision rate"
+                  before={learning.evaluation.before.safeRate}
+                  after={learning.evaluation.after.safeRate}
+                />
+                <BeforeAfterBar
+                  label="Correct automation"
+                  before={learning.evaluation.before.correctAutomation}
+                  after={learning.evaluation.after.correctAutomation}
+                />
+                <div className="flex items-baseline justify-between text-xs">
+                  <span className="text-bh-muted">Avg reward</span>
+                  <span className="flex items-center gap-2">
+                    <span className="font-mono text-bh-muted">
+                      {learning.evaluation.before.avgReward}
+                    </span>
+                    <span className="text-bh-line-strong">→</span>
+                    <span className="font-mono font-semibold text-bh-accent-ink">
+                      {learning.evaluation.after.avgReward}
+                    </span>
+                    <DeltaBadge value={learning.evaluation.improvement.avgReward} />
+                  </span>
+                </div>
+              </div>
+            </Card>
+
+            <Card>
+              <CardHeader
+                icon="grid"
+                title="Holdout split"
+                hint={`seeded ${learning.evaluation.seed} · reproducible`}
+              />
+              <div className="space-y-2.5 px-4 py-4">
+                <p className="text-xs leading-relaxed text-bh-muted">{learning.evaluation.label}</p>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <span className="rounded bg-bh-surface-2 px-2 py-1 font-mono text-[11px] text-bh-muted">
+                    {learning.evaluation.total} rows
+                  </span>
+                  <span className="rounded bg-bh-surface-2 px-2 py-1 font-mono text-[11px] text-bh-muted">
+                    {learning.evaluation.train} train ({Math.round(learning.evaluation.splitFraction * 100)}%)
+                  </span>
+                  <span className="rounded bg-bh-surface-2 px-2 py-1 font-mono text-[11px] text-bh-muted">
+                    {learning.evaluation.eval} eval
+                  </span>
+                  <span className="rounded bg-bh-surface-2 px-2 py-1 font-mono text-[11px] text-bh-muted">
+                    reward model +{learning.evaluation.rewardModel.correct} / −{Math.abs(learning.evaluation.rewardModel.unsafe)}
+                  </span>
+                </div>
+                {learning.evaluation.buckets.length > 0 && (
+                  <table className="mt-2 w-full min-w-[420px] text-left">
+                    <thead>
+                      <tr className="border-b border-bh-line text-[11px] uppercase tracking-wider text-bh-faint">
+                        <th className="py-2 font-medium">Bucket (risk|severity|type)</th>
+                        <th className="py-2 font-medium">Samples</th>
+                        <th className="py-2 font-medium">Before</th>
+                        <th className="py-2 font-medium">After</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-bh-line/60">
+                      {learning.evaluation.buckets.slice(0, 6).map((bucket) => (
+                        <tr key={bucket.key}>
+                          <td className="py-2 font-mono text-[11px] text-bh-muted">{bucket.key}</td>
+                          <td className="py-2 font-mono text-[11px] text-bh-ink">{bucket.samples}</td>
+                          <td className="py-2 font-mono text-[11px] text-bh-muted">{bucket.beforeAccuracy}%</td>
+                          <td className="py-2">
+                            <span className="flex items-center gap-1.5">
+                              <span className="font-mono text-[11px] font-semibold text-bh-accent-ink">
+                                {bucket.afterAccuracy}%
+                              </span>
+                              <DeltaBadge value={bucket.afterAccuracy - bucket.beforeAccuracy} />
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            </Card>
+          </div>
+        </section>
+      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         {/* Experience timeline */}

@@ -2,6 +2,7 @@ import 'server-only'
 
 import { prisma } from './db'
 import { Prisma } from '@prisma/client'
+import type { AgentName, AgentStatus } from '@/lib/api/observability'
 import { loadTerminalSummaryFacts, buildTerminalSummaryText } from './notifications/summary'
 import type {
   AgentRun,
@@ -95,24 +96,59 @@ const DEMO_CYBER_BY_SEVERITY: Record<string, number> = {
   CRITICAL: 20,
 }
 
+const DEMO_RELIABILITY_BY_SEVERITY: Record<string, number> = {
+  NONE: 100,
+  LOW: 95,
+  MEDIUM: 70,
+  HIGH: 45,
+  CRITICAL: 25,
+}
+
 export interface DemoPolicyScores {
   riskScore: number
   cyberSafetyScore: number
   systemHealth: number
+  applicationReliabilityScore: number
+  totalHealthScore: number
+}
+
+// Weighted combination over the component dimensions. All start at 100 when the
+// system is clean and recover only through validated repairs (never through a
+// bare file restore). Weights: risk inverse 25%, cyber 25%, reliability 25%,
+// system health 25%.
+export function compositeHealthScore(parts: {
+  riskScore: number
+  cyberSafetyScore: number
+  applicationReliabilityScore: number
+  systemHealth: number
+}): number {
+  const inverseRisk = 100 - parts.riskScore
+  return Math.round(
+    0.25 * inverseRisk +
+      0.25 * parts.cyberSafetyScore +
+      0.25 * parts.applicationReliabilityScore +
+      0.25 * parts.systemHealth,
+  )
 }
 
 // Derives the deterministic dashboard scores from the severities actually
-// present in the active incident set. Returns NORMAL (0/100/100) when none.
+// present in the active incident set. Returns NORMAL (0/100/100/100/100) when none.
 export function demoPolicyScores(incidents: { severity: string }[]): DemoPolicyScores {
   let maxSeverity: string = 'NONE'
   for (const incident of incidents) {
     const sev: string = incident.severity ?? 'LOW'
     if (severityRank(sev) > severityRank(maxSeverity)) maxSeverity = sev
   }
+  const riskScore = DEMO_RISK_BY_SEVERITY[maxSeverity] ?? 0
+  const cyberSafetyScore = DEMO_CYBER_BY_SEVERITY[maxSeverity] ?? 100
+  const applicationReliabilityScore = DEMO_RELIABILITY_BY_SEVERITY[maxSeverity] ?? 100
+  const systemHealth = DEMO_HEALTH_BY_SEVERITY[maxSeverity] ?? 100
   return {
-    riskScore: DEMO_RISK_BY_SEVERITY[maxSeverity] ?? 0,
-    cyberSafetyScore: DEMO_CYBER_BY_SEVERITY[maxSeverity] ?? 100,
-    systemHealth: DEMO_HEALTH_BY_SEVERITY[maxSeverity] ?? 100,
+    riskScore,
+    cyberSafetyScore,
+    systemHealth,
+    applicationReliabilityScore,
+    totalHealthScore: compositeHealthScore({ riskScore, cyberSafetyScore, applicationReliabilityScore, systemHealth }),
   }
 }
 
@@ -174,6 +210,8 @@ export interface Overview {
   riskScore: number
   cyberSafetyScore: number
   systemHealth: number
+  applicationReliabilityScore: number
+  totalHealthScore: number
   activeIncidents: number
 }
 
@@ -453,11 +491,21 @@ export async function computeOverview(): Promise<Overview> {
   // incident is active the deterministic demo policy reflects the live state.
   const systemHealth =
     activeIncidents.length === 0 ? computeSystemHealth(components) : demo.systemHealth
+  // Recompute the total with the ACTUAL reported health (real probes when
+  // clean) so the composite never disagrees with the health card.
+  const totalHealthScore = compositeHealthScore({
+    riskScore: demo.riskScore,
+    cyberSafetyScore: demo.cyberSafetyScore,
+    applicationReliabilityScore: demo.applicationReliabilityScore,
+    systemHealth,
+  })
 
   return {
     riskScore: demo.riskScore,
     cyberSafetyScore: demo.cyberSafetyScore,
     systemHealth,
+    applicationReliabilityScore: demo.applicationReliabilityScore,
+    totalHealthScore,
     activeIncidents: activeIncidents.length,
   }
 }
@@ -497,11 +545,11 @@ export interface IncidentEventDTO {
 
 export interface AgentRunDTO {
   id: string
-  agent: AgentRun['agent']
+  agent: AgentName
   kind: string | null
   role: string
   round: number
-  status: AgentRun['status']
+  status: AgentStatus
   progress: number
   currentActivity: string | null
   inputSummary: string | null
@@ -510,6 +558,9 @@ export interface AgentRunDTO {
   mode: string
   model: string | null
   error: string | null
+  promptTokens: number | null
+  contextSize: number | null
+  contextLevel: number | null
   completedAt: string | null
   createdAt: string
 }
@@ -635,6 +686,11 @@ export function serializeIncidentEvent(event: IncidentEvent): IncidentEventDTO {
 }
 
 export function serializeAgentRun(run: AgentRun): AgentRunDTO {
+  const ctx = (run.context ?? null) as {
+    contextSize?: number | null
+    contextLevel?: number | null
+    compacted?: { from: number; to: number; level: number } | null
+  } | null
   return {
     id: run.id,
     agent: run.agent,
@@ -650,6 +706,9 @@ export function serializeAgentRun(run: AgentRun): AgentRunDTO {
     mode: run.mode,
     model: run.model,
     error: run.error,
+    promptTokens: run.promptTokens,
+    contextSize: ctx?.contextSize ?? null,
+    contextLevel: ctx?.contextLevel ?? null,
     completedAt: run.completedAt ? run.completedAt.toISOString() : null,
     createdAt: run.createdAt.toISOString(),
   }

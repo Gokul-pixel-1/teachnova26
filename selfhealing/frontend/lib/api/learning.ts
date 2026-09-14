@@ -50,10 +50,47 @@ export interface EvaluationStats {
   score: number
 }
 
+export interface PolicyMetrics {
+  accuracy: number
+  safeRate: number
+  correctAutomation: number
+  avgReward: number
+}
+
+export interface EvalBucket {
+  key: string
+  samples: number
+  beforeAccuracy: number
+  afterAccuracy: number
+}
+
+export interface RlEvaluation {
+  source: 'synthetic-evaluation'
+  label: string
+  seed: number
+  total: number
+  train: number
+  eval: number
+  splitFraction: number
+  rewardModel: { correct: number; safeSuboptimal: number; unsafe: number }
+  datasetPreview: Array<{
+    state: { incidentType: string; severity: string; risk: string; confidenceBucket: string }
+    optimal: string
+    recordedAction: string
+    recordedReward: number
+  }>
+  before: PolicyMetrics
+  after: PolicyMetrics
+  improvement: PolicyMetrics
+  buckets: EvalBucket[]
+}
+
 export interface LearningResponse {
   ok: boolean
   metrics: LearningMetrics
   policy: RewardPolicy
+  rl: { minSamples: number; epsilon: number; actions: string[] }
+  evaluation: RlEvaluation
 }
 
 export interface EvaluationResponse {

@@ -2,6 +2,22 @@
 
 **Project root:** `/home/dharshan/selfhealing`
 
+> **Phase 10 FINAL PASS (2026-09-13):** the active demo path uses the **cloud
+> Groq provider only** (`AI_PROVIDER=groq`, `AI_MODEL=qwen/qwen3.8-27b`); Ollama
+> is still supported but NOT required. Real server errors (status ≥ 500) now
+> **automatically** create an incident and start the self-healing pipeline
+> (`logApiError` → auto-scan), so `POST /api/incidents/scan` is only a manual
+> fallback. HIGH-risk patches are approved/rejected in the UI from the incident
+> detail page (PROCEED/REJECT buttons). `/ai/learning` shows the RL decision
+> policy before→after evaluation over a deterministic synthetic holdout split.
+>
+> Known reliability note (verified live 2026-09-13): on the small Groq model
+> (`qwen/qwen3.8-27b`) the HIGH-01 login fix may be ROLLED_BACK because the
+> model paraphrases the auth route instead of quoting it byte-for-byte — the
+> anchor gate refuses the patch, which is the correct safe behavior. Retry the
+> scenario (re-activate HIGH-01 + wrong-password 500) if the quote misses; the
+> poster-child auto-heal demo (LOW-01 posts) succeeds reliably.
+
 Two runnable application directories:
 
 | Build | Directory | Port | DB | Has AI |
@@ -902,17 +918,18 @@ There is no standalone CLI for RL data; the harness scripts drive the *real*
 repair loop, which persists the learning rows; the exports are read-only JSON
 APIs.
 
-**Generate experiences (real repair runs):**
+**Verify the real self-healing loop (fault → incident → engine):**
 ```bash
 cd /home/dharshan/selfhealing/frontend
-# (a) hermetic deterministic cycles — crash-test many scenarios fast:
-python3 scripts/e2e_phase10_learning.py        # ≥50 checks; writes real rows
-# (b) full real-provider cycles:
-node scripts/verify-self-healing.mjs           # 80 checks; writes real rows
-python3 scripts/e2e_phase9_full.py             # 64 checks (browser)
+# hermetic deterministic cycles — restart the dev server freshly first:
+node scripts/verify-self-healing.mjs        # 103 checks; writes real rows
+python3 scripts/e2e_real_self_healing.py    # 69 checks; stdlib-only HTTP E2E
 ```
-(All require the dev server on `localhost:3000`, `FAULT_INJECTION_ENABLED=true`,
-and `(b)` additionally a configured real Groq provider.)
+(Require the dev server on `localhost:3000` and the env
+`SELF_HEALING_TEST_MODE=true AI_PROVIDER=test FAULT_INJECTION_ENABLED=true AUTH_GUARD_ENABLED=false`.
+For a deterministic run start the dev server freshly; the suite restarts it again
+before its harness-only behavioural block. Browser UI checks use
+`python3 scripts/e2e_phase9_full.py` (Playwright).)
 
 **Dataset export (JSON reads):**
 ```bash
@@ -952,7 +969,8 @@ npm run lint && npx tsc --noEmit && npm run build
 node scripts/verify-posts-projects.mjs        # posts/projects/likes/comments: 88 passed, 0 failed (latest)
 node scripts/verify-observability.mjs         # CLEAN baseline (after reset): 28 passed, 0 failed
 node scripts/verify-security.mjs              # CLEAN baseline (after reset): 32 passed, 0 failed
-node scripts/verify-self-healing.mjs          # real fault→incident→engine: 80 passed, 0 failed
+node scripts/verify-self-healing.mjs          # real fault→incident→engine: 103 passed, 0 failed
+python3 scripts/e2e_real_self_healing.py      # 69 passed, 0 failed (stdlib-only HTTP E2E, --quick)
 ```
 
 ### Browser E2E suites (Playwright; server on :3000)
@@ -960,7 +978,8 @@ node scripts/verify-self-healing.mjs          # real fault→incident→engine: 
 python3 scripts/e2e_phase6_full.py            # Phase 6 full flow: 44 passed, 0 failed
 python3 scripts/e2e_phase7_full.py            # Command Center on CLEAN DB: 25 passed, 0 failed
 python3 scripts/e2e_phase8_full.py            # Security Command Center (real Groq): see e2e_phase8_full.py
-python3 scripts/e2e_phase9_full.py            # Self-Healing system: 64 passed, 0 failed
+python3 scripts/e2e_phase9_full.py            # Self-Healing browser: 64 passed, 0 failed
+python3 scripts/e2e_real_self_healing.py      # Real self-healing HTTP E2E: 69 passed, 0 failed
 python3 scripts/e2e_phase10_learning.py       # Learning loop: 50 passed, 0 failed
 ```
 > Test-mode / provider note: suites that drive the repair engine (phase
@@ -1171,10 +1190,11 @@ suites printed when last run green):
 | `verify-posts-projects.mjs` | 88 passed, 0 failed |
 | `verify-observability.mjs` (clean baseline) | 28 passed, 0 failed |
 | `verify-security.mjs` (clean baseline) | 32 passed, 0 failed |
-| `verify-self-healing.mjs` | 80 passed, 0 failed |
+| `verify-self-healing.mjs` | 103 passed, 0 failed |
+| `e2e_real_self_healing.py` | 69 passed, 0 failed |
 | `e2e_phase6_full.py` | 44 passed, 0 failed |
 | `e2e_phase7_full.py` (clean DB) | 25 passed, 0 failed |
-| `e2e_phase9_full.py` | 64 passed, 0 failed |
+| `e2e_phase9_full.py` (browser) | 64 passed, 0 failed |
 | `e2e_phase10_learning.py` | 50 passed, 0 failed |
 | `e2e_no_ai_demo.py` (No-AI) | 28 passed, 0 failed |
 | Attack demo — No-AI (3001) | observed: 61×401 → 323×503, health unavailable, exit 0 |

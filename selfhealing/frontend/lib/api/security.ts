@@ -82,6 +82,8 @@ export interface SecurityOverviewDTO {
   riskScore: number
   cyberSafetyScore: number
   systemHealth: number
+  applicationReliabilityScore: number
+  totalHealthScore: number
   activeIncidents: number
   activeFindings: number
   findingsBySeverity: Record<string, number>
@@ -98,6 +100,7 @@ export interface SecurityStatusDTO {
   agents: Record<string, number>
   model: {
     provider: string
+    mode: 'REAL' | 'TEST'
     configured: string
     offered: string[] | null
     valid: boolean | null
@@ -178,6 +181,28 @@ export const runPipelineFor = (incidentId: string) =>
 
 export const testTelegram = () =>
   postJson<TelegramTestResult>('/api/telegram/test', {})
+
+// ---------------------------------------------------------------------------
+// Approval decisions (HITL gate for HIGH-risk patches)
+// ---------------------------------------------------------------------------
+
+export interface ApprovalDecisionResult {
+  ok: boolean
+  approved?: boolean
+  rejected?: boolean
+  expired?: boolean
+  message?: string
+  status?: string
+  repair?: {
+    ok: boolean
+    stage?: string
+    validation?: { result: string; probes: Array<{ name: string; ok: boolean }> }
+  } | null
+  approvalId?: string
+}
+
+export const submitApprovalDecision = (approvalId: string, action: 'proceed' | 'reject') =>
+  postJson<ApprovalDecisionResult>('/api/approvals/proceed', { approvalId, action })
 
 // ---------------------------------------------------------------------------
 // Realtime (SSE) events — /api/security/events

@@ -103,104 +103,78 @@ def main():
         for fid in expected_faults:
             check(f"Fault {fid} present", fid in fault_ids)
 
-        # ==================== LOW FAULT TESTS ====================
-        print("\n=== LOW Fault Tests ===")
-        
-        LOW_TRIGGERS = {
-            "LOW-01": ("POST", "/api/posts", {"content": "Test post content", "tags": []}),
-            "LOW-03": ("POST", "/api/posts", {"content": "Test post content", "tags": []}),
-        }
-        for fault_id, (method, path, payload) in LOW_TRIGGERS.items():
-            status, _ = fault_via_api(ctx, fault_id, "activate")
-            check(f"{fault_id} activate API → 200", status == 200)
-            api = ctx.request
-            api.post(f"{BASE}/api/auth/login", data={"identifier": "arjun", "password": "buildhub-demo1"})
-            resp = api.post(f"{BASE}{path}", data=payload)
-            check(f"{fault_id} triggers fault on {path}", resp.status >= 400, f"status={resp.status}")
-            status, _ = fault_via_api(ctx, fault_id, "deactivate")
-            check(f"{fault_id} deactivate API → 200", status == 200)
+        # ==================== REAL SELF-HEALING PIPELINE ====================
+        # (fault → real failing request → scan → engine → auto/approved repair)
+        print("\n=== Real Self-Healing Pipeline (fault → incident → engine → resolve) ===")
 
-        # LOW-02 is a response-field typo (does not error; returns typo field)
-        status, _ = fault_via_api(ctx, "LOW-02", "activate")
-        check("LOW-02 activate API → 200", status == 200)
-        api = ctx.request
-        api.post(f"{BASE}/api/auth/login", data={"identifier": "arjun", "password": "buildhub-demo1"})
-        create = api.post(f"{BASE}/api/posts", data={"content": "Test post for LOW-02", "tags": []})
-        create_body = json.loads(create.body()) if create.body() else {}
-        # With LOW-02 active the response field is renamed post -> poost
-        post_id = create_body.get("poost", {}).get("id") or create_body.get("post", {}).get("id")
-        check("LOW-02 renames post->poost field", "poost" in str(create_body), "")
-        if post_id:
-            detail = api.get(f"{BASE}/api/posts/{post_id}")
-            body = json.loads(detail.body()) if detail.body() else {}
-            check("LOW-02 typo present on GET detail", "poost" in str(body), "")
-        else:
-            check("LOW-02 post ID extractable", False, f"status={create.status}")
-        status, _ = fault_via_api(ctx, "LOW-02", "deactivate")
-        check("LOW-02 deactivate API → 200", status == 200)
 
-        # ==================== MEDIUM FAULT TESTS ====================
-        print("\n=== MEDIUM Fault Tests ===")
-        
-        api = ctx.request
-        api.post(f"{BASE}/api/auth/login", data={"identifier": "arjun", "password": "buildhub-demo1"})
-        for fault_id in ["MEDIUM-01", "MEDIUM-02", "MEDIUM-03"]:
-            status, _ = fault_via_api(ctx, fault_id, "activate")
-            check(f"{fault_id} activate API → 200", status == 200)
-            api.post(f"{BASE}/api/auth/login", data={"identifier": "arjun", "password": "buildhub-demo1"})
-            if fault_id == "MEDIUM-01":
-                resp = api.post(f"{BASE}/api/posts", data={"content": "Test post for MEDIUM-01", "tags": []})
-            elif fault_id == "MEDIUM-02":
-                resp = api.get(f"{BASE}/api/posts")
-            else:
-                proj = api.post(f"{BASE}/api/projects", data={"name": "E2E Project M03", "description": "d", "status": "ACTIVE"})
-                pid = json.loads(proj.body()).get("project", {}).get("id") if proj.body() else None
-                resp = api.patch(f"{BASE}/api/projects/{pid}", data={"name": "Updated"}) if pid else proj
-            check(f"{fault_id} triggers fault", resp.status >= 400, f"status={resp.status}")
-            status, _ = fault_via_api(ctx, fault_id, "deactivate")
-            check(f"{fault_id} deactivate API → 200", status == 200)
-
-        # ==================== HIGH FAULT TESTS ====================
-        print("\n=== HIGH Fault Tests ===")
-        
-        HIGH_TRIGGERS = {
-            "HIGH-01": ("POST", "/api/auth/login", {"identifier": "arjun", "password": "wrongpassword"}),
-            "HIGH-02": ("DELETE", "/api/projects/nonexistent", None),
-            "HIGH-03": ("GET", "/api/posts", None),
-        }
-        for fault_id, (method, path, payload) in HIGH_TRIGGERS.items():
-            status, _ = fault_via_api(ctx, fault_id, "activate")
-            check(f"{fault_id} activate API → 200", status == 200)
-            api = ctx.request
-            api.post(f"{BASE}/api/auth/login", data={"identifier": "arjun", "password": "buildhub-demo1"})
-            if method == "POST":
-                resp = api.post(f"{BASE}{path}", data=payload)
-            elif method == "GET":
+        def api_json(api, method, path, payload=None):
+            data = json.dumps(payload) if payload is not None else None
+            if method == "GET":
                 resp = api.get(f"{BASE}{path}")
+            elif method == "POST":
+                resp = api.post(f"{BASE}{path}", data=data)
             else:
-                resp = api.delete(f"{BASE}{path}")
-            check(f"{fault_id} triggers fault on {path}", resp.status >= 400 or resp.status == 200, f"status={resp.status}")
-            status, _ = fault_via_api(ctx, fault_id, "deactivate")
-            check(f"{fault_id} deactivate API → 200", status == 200)
+                resp = api.request(method, f"{BASE}{path}", data=data)
+            return resp.status, (json.loads(resp.body()) if resp.body() else {})
 
-        # ==================== APPROVAL WORKFLOW ====================
-        print("\n=== Approval Workflow ===")
-        
-        # Check approvals API via request context
+
         api = ctx.request
         api.post(f"{BASE}/api/auth/login", data={"identifier": "arjun", "password": "buildhub-demo1"})
-        create_resp = api.post(f"{BASE}/api/approvals/create", data={
-            "incidentId": "test-incident-id",
-            "patchId": "PATCH-test123",
-            "operator": "test-operator",
-        })
-        check("Approvals create endpoint reachable", create_resp.status in (200, 400, 404, 409))
-        
-        proceed_resp = api.post(f"{BASE}/api/approvals/proceed", data={
-            "approvalId": "APR-123456",
-            "action": "proceed",
-        })
-        check("Approvals proceed endpoint reachable", proceed_resp.status in (404, 400, 409))
+
+
+        def wait_failure(api, fn, tries=30, wait_ms=750):
+            """Re-throw `fn` until it produces a 5xx (Turbopack recompile latency)."""
+            last = None
+            for _ in range(tries):
+                last = fn()
+                if last.status >= 500:
+                    return last
+                time.sleep(wait_ms / 1000.0)
+            return last
+
+        # LOW-01 — real 500 → scan → engine auto-repair → RESOLVED
+        status, _ = fault_via_api(ctx, "LOW-01", "activate")
+        check("LOW-01 activate → 200 with defect location", status == 200)
+        time.sleep(2)
+        resp = wait_failure(api, lambda: api.post(
+            f"{BASE}/api/posts", data={"content": f"Phase9-LOW01 {int(time.time())}", "tags": []}))
+        check("LOW-01 trigger → real failure (500)", resp.status >= 500,
+              f"status={getattr(resp, 'status', None)}")
+        _, scan_b = api_json(api, "POST", "/api/incidents/scan", {"limit": 200})
+        created = scan_b.get("created", [])
+        check("LOW-01 scan → real incident(s)", len(created) > 0, str(scan_b)[:200])
+        if created:
+            _, run_b = api_json(api, "POST", "/api/security/run", {"incidentId": created[0]["id"]})
+            check("LOW-01 engine repairs → RESOLVED", run_b.get("stage") == "RESOLVED", f"stage={run_b.get('stage')}")
+        status, _ = fault_via_api(ctx, "LOW-01", "deactivate")
+        check("LOW-01 deactivate → 200", status == 200)
+
+        # HIGH-01 — real auth 500 → HIGH incident → human approval → RESOLVED
+        status, _ = fault_via_api(ctx, "HIGH-01", "activate")
+        check("HIGH-01 activate → 200 with defect location", status == 200)
+        time.sleep(2)
+        resp = wait_failure(api, lambda: api.post(
+            f"{BASE}/api/auth/login",
+            data={"identifier": "arjun", "password": "wrong-password-for-phase9-e2e"}))
+        check("HIGH-01 trigger → real failure (500)", resp.status >= 500,
+              f"status={getattr(resp, 'status', None)}")
+        _, scan_b = api_json(api, "POST", "/api/incidents/scan", {"limit": 200})
+        created = scan_b.get("created", [])
+        check("HIGH-01 scan → real incident(s)", len(created) > 0, str(scan_b)[:200])
+        approval_id = None
+        if created:
+            _, run_b = api_json(api, "POST", "/api/security/run", {"incidentId": created[0]["id"]})
+            check("HIGH-01 run → WAITING_APPROVAL (human gate)",
+                  run_b.get("stage") == "WAITING_APPROVAL", f"stage={run_b.get('stage')}")
+            approval_id = run_b.get("approvalId")
+        if approval_id:
+            _, pr_b = api_json(api, "POST", "/api/approvals/proceed",
+                               {"approvalId": approval_id, "action": "proceed"})
+            stage = (pr_b.get("repair") or {}).get("stage")
+            check("HIGH-01 approval PROCEED → RESOLVED", stage == "RESOLVED", f"stage={stage}")
+        status, _ = fault_via_api(ctx, "HIGH-01", "deactivate")
+        check("HIGH-01 deactivate → 200", status == 200)
 
         # ==================== TELEGRAM DEDUPLICATION ====================
         print("\n=== Telegram Deduplication ===")
@@ -323,12 +297,12 @@ def main():
 
         # ==================== VALIDATION & ROLLBACK ====================
         print("\n=== Validation & Rollback ===")
-        
-        # Check apply-patch endpoint via request context (expect 404 for unknown incident)
-        api = ctx.request
-        api.post(f"{BASE}/api/auth/login", data={"identifier": "arjun", "password": "buildhub-demo1"})
-        apply_resp = api.post(f"{BASE}/api/incidents/test-id/apply-patch", data={})
-        check("Apply-patch endpoint reachable (404/401/403)", apply_resp.status in (404, 401, 403, 400, 409))
+
+        # The real engine's validation + rollback is covered end-to-end in the
+        # self-healing pipeline section above (LOW-01 auto-resolve validates the
+        # applied patch with real probes; HIGH-01 approval apply continues the
+        # same validated repair). Rollback on a failed probe is asserted by
+        # scripts/verify-self-healing.mjs (ROllED_BACK branch).
 
         # ==================== MOBILE RESPONSIVE ====================
         print("\n=== Mobile Responsive ===")

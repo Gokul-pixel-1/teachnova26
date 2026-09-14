@@ -15,12 +15,12 @@ START_MS = 1_700_000_000_000
 
 def ev(offset_ms: int, *, level="INFO", service="api", status=None,
        route="/api/posts", method="GET", error_code=None,
-       request_id="req-0000") -> dict:
+       request_id="req-0000", message="test event") -> dict:
     return {
         "ts": START_MS + offset_ms,
         "level": level,
         "service": service,
-        "message": "test event",
+        "message": message,
         "route": route,
         "method": method,
         "status": status,
@@ -90,6 +90,55 @@ class RuleTests(unittest.TestCase):
                   for i in range(5)]
         rule = has_rule(analyze(events), "repeated-unauthorized-mutations")[0]
         self.assertEqual(rule["severity"], "HIGH")
+
+
+class PayloadRuleTests(unittest.TestCase):
+    """Phase 10 heuristics — best-effort signal rules over logged fields only."""
+
+    def test_path_traversal_input(self):
+        events = [ev(0, route="/api/files/../../../etc/passwd", method="GET")]
+        rule = has_rule(analyze(events), "path-traversal-input")[0]
+        self.assertEqual(rule["severity"], "MEDIUM")
+
+    def test_sql_injection_like_input(self):
+        events = [ev(0, message="SELECT * FROM users WHERE id = '1' OR '1'='1'")]
+        self.assertTrue(count_at_least(analyze(events), "sql-injection-like-input", 1))
+
+    def test_xss_like_input(self):
+        events = [ev(0, message="<script>alert(document.cookie)</script>")]
+        self.assertTrue(count_at_least(analyze(events), "xss-like-input", 1))
+
+    def test_command_injection_like_input(self):
+        events = [ev(0, message="post_id=1; rm -rf /tmp/x")]
+        self.assertTrue(count_at_least(analyze(events), "command-injection-like-input", 1))
+
+    def test_sensitive_endpoint_access(self):
+        events = [ev(0, route="/.env.production")]
+        rule = has_rule(analyze(events), "sensitive-endpoint-access")[0]
+        self.assertEqual(rule["severity"], "HIGH")
+
+    def test_application_crash_loop(self):
+        events = [ev(i * 120_000, status=500, route="/api/checkout")
+                  for i in range(3)]
+        rule = has_rule(analyze(events), "application-crash-loop")[0]
+        self.assertEqual(rule["severity"], "HIGH")
+        self.assertEqual(rule["endpoint"], "/api/checkout")
+
+    def test_secret_string_in_security_log(self):
+        events = [ev(0, level="SECURITY", message="rejected password=hashed-not-real")]
+        self.assertTrue(count_at_least(analyze(events), "secret-string-in-security-log", 1))
+
+    def test_benign_messages_do_not_trigger_heuristics(self):
+        events = [
+            ev(0, message="Query completed in 12ms"),
+            ev(1000, message="User profile updated"),
+            ev(2000, message="SELECT is a reserved keyword in the parser"),
+        ]
+        findings = analyze(events)
+        self.assertEqual(
+            [f["ruleId"] for f in findings if f["ruleId"].startswith(("sql-", "xss-", "command-", "path-"))],
+            [],
+        )
 
 
 class OutputContractTests(unittest.TestCase):

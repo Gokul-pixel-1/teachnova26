@@ -80,6 +80,11 @@ function RunCard({ run, flowStage }: { run: AgentRunDTO | undefined; flowStage: 
           ? `AI ANALYSIS UNAVAILABLE — ${run.error}`
           : (run?.currentActivity ?? run?.role ?? 'Waiting')}
       </p>
+      {run?.contextSize != null && (
+        <p className="mt-0.5 font-mono text-[10px] text-bh-faint">
+          context {run.contextSize} tok · {run.model ?? ''}
+        </p>
+      )}
       <ProgressBar
         value={run?.progress ?? 0}
         tone={

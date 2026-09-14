@@ -20,6 +20,7 @@ Finding contract (must match AnalyzerFinding in lib/server/security.ts):
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -226,6 +227,102 @@ def analyze(events: list[Event]) -> list[dict[str, Any]]:
             "repeated-unauthorized-mutations", "Repeated unauthorized mutations", "HIGH",
             window, key,
             f"{len(window)} unauthorized {key} mutations within 10 minutes.",
+        )
+
+    # 10. Suspicious / payload-embedded input heuristics. These rules read ONLY
+    #     the fields the logger stores (route, method, message) — request bodies
+    #     are never persisted, so these are best-effort signal rules, not
+    #     proof of exploitation. One finding per rule per endpoint+method.
+    def payload_rule(rule_id: str, title: str, severity: str, regex: object) -> None:
+        by_key: dict[str, list[Event]] = defaultdict(list)
+        for ev in events:
+            hay = f"{ev['route'] or ''} {ev['method'] or ''} {ev['message'] or ''}"
+            if regex.search(hay):
+                by_key[f"{ev['route'] or 'unknown'}|{ev['method'] or 'GET'}"].append(ev)
+        for key, window in by_key.items():
+            emit(
+                rule_id, title, severity, window, key,
+                f"{len(window)} matching row(s) for {key}.",
+            )
+
+    payload_rule(
+        "path-traversal-input",
+        "Path traversal-like input",
+        "MEDIUM",
+        re.compile(r"(?:^|[/?&;])\.\.+[/\\]?|%2e%2e|%252e%252e|\.\./|\.\.[\\/]", re.IGNORECASE),
+    )
+    payload_rule(
+        "sql-injection-like-input",
+        "SQL injection-like input",
+        "MEDIUM",
+        re.compile(
+            r"(\bunion\b\s+\bselect\b)|('(\s*or\s*)?'[^=]*=')|('--)|(;\s*\bdrop\b\s+table)|(\bxp_cmdshell\b)|(information_schema)|(/\*.*\*/)|(\bsleep\s*\()",
+            re.IGNORECASE,
+        ),
+    )
+    payload_rule(
+        "xss-like-input",
+        "Cross-site scripting-like input",
+        "MEDIUM",
+        re.compile(r"(<script)|(javascript:)|(onerror\s*=)|(onload\s*=)|(%3cscript)|(<img)|(<svg)", re.IGNORECASE),
+    )
+    payload_rule(
+        "command-injection-like-input",
+        "Command injection-like input",
+        "MEDIUM",
+        re.compile(
+            r"(\$\(\s*)|(`\s*(id|cat|ls|env))|((;|&&|\||\n)\s*(rm|cat|ls|nc|wget|curl|python|bash|sh)\b)|(chmod\s+\+x)|(--install-module)",
+            re.IGNORECASE,
+        ),
+    )
+
+    # 11. Sensitive-config / secret endpoint access (HIGH) — direct requests to
+    #     well-known config or environment files.
+    sensitive_paths = (
+        "/.env", "/.git/config", "/config.json", "/application.yml", "/application.yaml",
+        "/docker-compose.yml", "/docker-compose.yaml", "/.env.production", "/.env.local",
+        "/proc/self/environ", "/etc/passwd", "/v1/config", "/.aws/credentials",
+    )
+    sensitive_hits: list[Event] = [
+        ev for ev in events
+        if ev["route"] and any(ev["route"].lower() == p or ev["route"].lower().endswith(p) for p in sensitive_paths)
+    ]
+    for ev in sensitive_hits:
+        key = f"{ev['route'] or 'unknown'}|{ev['method'] or 'GET'}"
+        emit(
+            "sensitive-endpoint-access",
+            "Sensitive endpoint access attempt",
+            "HIGH",
+            [ev],
+            key,
+            f"Request to {ev['route']} ({ev['method']}) — possible config/exposure probe.",
+        )
+
+    # 12. Server crash-loop (HIGH) — ≥3 rows with status 500 on the same route
+    #     within 10 minutes (status-based complement to server-error-spike).
+    status500 = [ev for ev in events if _status(ev, 500)]
+    for key, window in find_bursts(status500, lambda ev: ev["route"] or "unknown", 10 * 60_000, 3):
+        emit(
+            "application-crash-loop",
+            "Application crash-loop",
+            "HIGH",
+            window, key,
+            f"{len(window)} HTTP 500 rows on {key} within 10 minutes.",
+        )
+
+    # 13. Secret-string leakage in SECURITY-level logs (HIGH) — only matches
+    #     explicitly-tagged SECURITY rows so normal messages never trigger it.
+    secret_re = re.compile(r"(password\s*[=:]|api[_-]?key\s*[=:]|secret\s*[=:]|DATABASE_URL\s*[=:])", re.IGNORECASE)
+    secret_hits = [ev for ev in events if ev["level"] == "SECURITY" and secret_re.search(ev["message"] or "")]
+    for ev in secret_hits:
+        key = f"{ev['route'] or 'unknown'}|{ev['method'] or 'GET'}"
+        emit(
+            "secret-string-in-security-log",
+            "Secret-like string in security log",
+            "HIGH",
+            [ev],
+            key,
+            "SECURITY-level log line contains a secret-like assignment pattern; verify the logger never persists real credentials.",
         )
 
     return findings

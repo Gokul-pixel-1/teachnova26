@@ -36,15 +36,15 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-/** Injectable, environment-tunable reward weights. */
+/** Injectable, environment-tunable reward weights (Phase 10 FINAL PASS values). */
 export function getRewardPolicy(): RewardPolicy {
   return {
-    successfulRepair: intEnv('REPAIR_REWARD_SUCCESS', 10),
-    validationFailure: intEnv('REPAIR_REWARD_VALIDATION_FAILURE', -15),
-    rollback: intEnv('REPAIR_REWARD_ROLLBACK', -20),
-    securityRegression: intEnv('REPAIR_REWARD_SECURITY_REGRESSION', -40),
-    rejection: intEnv('REPAIR_REWARD_REJECTION', -8),
-    humanApproval: intEnv('REPAIR_REWARD_HUMAN_APPROVAL', 5),
+    successfulRepair: intEnv('REPAIR_REWARD_SUCCESS', 50),
+    validationFailure: intEnv('REPAIR_REWARD_VALIDATION_FAILURE', -50),
+    rollback: intEnv('REPAIR_REWARD_ROLLBACK', -75),
+    securityRegression: intEnv('REPAIR_REWARD_SECURITY_REGRESSION', -100),
+    rejection: intEnv('REPAIR_REWARD_REJECTION', 20),
+    humanApproval: intEnv('REPAIR_REWARD_HUMAN_APPROVAL', 40),
     humanRejection: intEnv('REPAIR_REWARD_HUMAN_REJECTION', 2),
   }
 }

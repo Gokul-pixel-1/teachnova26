@@ -20,8 +20,8 @@ import {
 } from './conversation'
 import type { RepairOptions } from './conversation'
 import { classifyPatchRisk, type PatchRisk } from './risk'
-import { verifyCandidate, applyCandidate } from './patch-engine'
-import { getFault, deactivateFault } from '@/lib/server/fault-injection'
+import { verifyCandidate, applyCandidate, applyRuntimeRepair } from './patch-engine'
+import { deactivateFaultsForEndpoint } from '@/lib/server/fault-injection'
 import { createApproval, consumeApproval } from '@/lib/server/approval'
 import { sendTelegram } from '@/lib/server/telegram'
 import {
@@ -30,9 +30,14 @@ import {
   buildApprovalRequiredMessage,
 } from '@/lib/server/notifications/summary'
 import { recordRepairMemory, recordRepairExperience } from '@/lib/server/learning/memory'
+import { recommendAction, confidenceBucket } from '@/lib/server/learning/decision'
+import { providerModeLabel } from '@/lib/server/provider'
 import { addIncidentEvent } from './events'
 import { logger } from '@/lib/server/logger'
+import { trace } from '@/lib/server/repair/trace'
+import { computeOverview } from '@/lib/server/observability'
 import type { Incident, RepairAttempt } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import type { CoderOutput } from '@/lib/server/providers/types'
 
 export interface RepairRunResult {
@@ -74,11 +79,20 @@ export async function runSelfHealingRepair(
   }
 
   const metadata = (incident.metadata ?? null) as { faultId?: string } | null
-  const faultId = metadata?.faultId ?? null
-  const fault = faultId ? getFault(faultId) : null
+  void metadata
 
   const attempt: RepairAttempt = await createRepairAttempt(incident)
+  await prisma.incident.update({
+    where: { id: incident.id },
+    data: { status: 'INVESTIGATING', summary: `Self-healing repair started (attempt ${attempt.attemptId}).` },
+  })
   await addIncidentEvent(incident.id, 'INVESTIGATING', 'Self-healing repair started', `attempt ${attempt.attemptId}`)
+  trace('SELF-HEALING', `repair started for ${incident.ref} (${incident.severity}, ${incident.errorCode ?? 'no code'}) — collecting real evidence`, {
+    incidentRef: incident.ref,
+    incidentId: incident.id,
+    route: incident.endpoint,
+    method: incident.method,
+  })
   await logger.info({
     service: 'self-healing',
     message: `Repair started for ${incident.ref}`,
@@ -94,26 +108,27 @@ export async function runSelfHealingRepair(
   const conversationOptions: RepairOptions = {
     maxRounds: options.maxRounds,
     scenario: options.scenario,
-    fault: fault
-      ? {
-          id: fault.id,
-          file: fault.target.file,
-          line: fault.target.line,
-          function: fault.target.function,
-          originalCode: fault.originalCode,
-          faultCode: fault.faultCode,
-        }
-      : null,
   }
 
   const conversation = await runRepairConversation(incident, attempt, evidence, conversationOptions)
   const candidate = conversation.candidate
+  const judgeDecision = conversation.judge?.decision ?? null
 
   await updateAttemptStatus(attempt.id, 'RISK_CLASSIFIED', {
     summary: conversation.humanBrief,
   })
 
-  if (!candidate) {
+  // The Judge is the FINAL gate before any repair: only an explicit APPROVE
+  // may reach PATCH. A REJECT, a FAILED/missing verdict, or a missing
+  // candidate ends honestly in AI_REPAIR_FAILED with NO patch attempted and
+  // NO validation run. Never execute PATCH unless the Judge approved.
+  if (!candidate || judgeDecision !== 'APPROVE') {
+    trace('JUDGE', `verdict=${judgeDecision ?? 'FAILED/MISSING'} — PATCH skipped because Judge did not approve`, {
+      incidentRef: incident.ref,
+      incidentId: incident.id,
+      route: incident.endpoint,
+      method: incident.method,
+    })
     const failure = await finalizeFailure(incident, attempt, conversation, evidence)
     return {
       ok: false,
@@ -122,8 +137,8 @@ export async function runSelfHealingRepair(
       stage: 'AI_REPAIR_FAILED',
       risk: null,
       requiresApproval: false,
-      candidateFile: null,
-      judgeDecision: conversation.judge?.decision ?? null,
+      candidateFile: candidate?.file ?? null,
+      judgeDecision,
       conversationStop: conversation.stopReason,
       roundsUsed: conversation.roundsUsed,
       rollback: false,
@@ -133,25 +148,62 @@ export async function runSelfHealingRepair(
 
   const risk: PatchRisk = classifyPatchRisk(incident, candidate.file).risk
   await updateAttemptStatus(attempt.id, 'RISK_CLASSIFIED', { risk })
+  trace('SELF-HEALING', `risk classified: ${risk} for ${candidate.file} (judge confidence ${conversation.judge?.confidence ?? 'n/a'})`, {
+    incidentRef: incident.ref,
+    incidentId: incident.id,
+    route: incident.endpoint,
+    method: incident.method,
+  })
 
-  // Candidate structural verification before any apply/approval.
-  const verified = verifyCandidate(candidate)
-  if (!verified.ok) {
-    const failure = await finalizeFailure(incident, attempt, conversation, evidence, undefined, `unsafe candidate: ${verified.error}`)
-    return {
-      ok: false,
-      incidentRef: incident.ref,
-      attemptId: attempt.attemptId,
-      stage: 'AI_REPAIR_FAILED',
-      risk,
-      requiresApproval: false,
-      candidateFile: candidate.file,
-      judgeDecision: conversation.judge?.decision ?? null,
-      conversationStop: conversation.stopReason,
-      roundsUsed: conversation.roundsUsed,
-      rollback: false,
-      telegram: failure.telegram,
+  // A runtime-repair candidate (healthy source + controlled runtime fault) is
+  // applied by restoring normal runtime behavior — real source files are never
+  // touched, so the source-anchor structural checks do not apply.
+  if (!candidate.runtimeRepair) {
+    // Candidate structural verification before any apply/approval.
+    const verified = verifyCandidate(candidate)
+    if (!verified.ok) {
+      const failure = await finalizeFailure(incident, attempt, conversation, evidence, undefined, `unsafe candidate: ${verified.error}`)
+      return {
+        ok: false,
+        incidentRef: incident.ref,
+        attemptId: attempt.attemptId,
+        stage: 'AI_REPAIR_FAILED',
+        risk,
+        requiresApproval: false,
+        candidateFile: candidate.file,
+        judgeDecision: conversation.judge?.decision ?? null,
+        conversationStop: conversation.stopReason,
+        roundsUsed: conversation.roundsUsed,
+        rollback: false,
+        telegram: failure.telegram,
+      }
     }
+  }
+
+  // RL decision layer (REAL mode only). The recommendation is RECORDED on the
+  // incident — it never overrides HIGH-risk approval, candidate verification,
+  // validation or rollback, and never widens file/security policy.
+  if (providerModeLabel() === 'REAL') {
+    const recommendation = await recommendAction({
+      incidentType: incident.errorCode ?? incident.title ?? 'runtime-failure',
+      severity: incident.severity,
+      risk,
+      confidenceBucket: confidenceBucket(conversation.judge?.confidence),
+    })
+    const meta = (incident.metadata ?? {}) as Record<string, unknown>
+    await prisma.incident.update({
+      where: { id: incident.id },
+      data: { metadata: { ...meta, rlRecommendation: recommendation } as unknown as Prisma.InputJsonValue },
+    })
+    await addIncidentEvent(incident.id, 'INVESTIGATING', 'RL decision layer', recommendation.reason)
+    await logger.info({
+      service: 'learning',
+      message: `RL recommendation ${recommendation.action}: ${recommendation.reason}`,
+      route: incident.endpoint,
+      method: incident.method,
+      status: 200,
+      incidentId: incident.id,
+    })
   }
 
   if (risk === 'HIGH') {
@@ -167,6 +219,12 @@ export async function runSelfHealingRepair(
       data: { status: 'WAITING_APPROVAL', summary: `Awaiting human approval ${approval.approvalId} for HIGH-risk patch.` },
     })
     await addIncidentEvent(incident.id, 'AWAITING_REVIEW', 'HIGH-risk patch awaiting approval', approval.approvalId)
+    trace('APPROVAL', `HIGH-risk patch ${candidate.file} requires human approval ${approval.approvalId}`, {
+      incidentRef: incident.ref,
+      incidentId: incident.id,
+      route: incident.endpoint,
+      method: incident.method,
+    })
     const telegram = await notifyApproval(incident)
 
     return {
@@ -187,19 +245,31 @@ export async function runSelfHealingRepair(
   }
 
   // LOW / MEDIUM: announce the auto-repair plan (risk policy) then apply +
-  // real validation + rollback. One ESCALATION per incident.
+  // real validation + rollback. One ESCALATION per incident. Runtime-repair
+  // candidates restore normal runtime behavior; file candidates are patched.
   await sendRepairPlanMessage(incident)
-  const decision = await applyCandidate(attempt, {
-    incident,
-    faultId,
-    file: candidate.file,
-    line: candidate.line,
-    function: candidate.function,
-    currentCode: candidate.currentCode,
-    proposedCode: candidate.proposedCode,
-  })
+  const decision = candidate.runtimeRepair
+    ? await applyRuntimeRepair(attempt, incident, {
+        file: candidate.file,
+        directive: candidate.runtimeRepair,
+      })
+    : await applyCandidate(attempt, {
+        incident,
+        file: candidate.file,
+        line: candidate.line,
+        function: candidate.function,
+        currentCode: candidate.currentCode,
+        proposedCode: candidate.proposedCode,
+      })
 
   if (decision.ok) {
+    // File patched → deactivate any stale runtime faults on this surface so
+    // the observable state returns to healthy (repaired, not leaked).
+    if (!candidate.runtimeRepair) {
+      const cleared = await deactivateFaultsForEndpoint(incident.endpoint, incident.method)
+      if (cleared.length) trace('PATCH', `runtime faults cleared post-patch: ${cleared.join(', ')}`, { incidentRef: incident.ref, incidentId: incident.id })
+    }
+
     await prisma.incident.update({
       where: { id: incident.id },
       data: { status: 'RESOLVED', resolvedAt: new Date(), summary: `Auto-repaired (${risk}): ${candidate.diagnosis}` },
@@ -214,10 +284,14 @@ export async function runSelfHealingRepair(
 
     await persistLearning(incident, attempt, candidate, risk, 'RESOLVED', evidence, decision.validation.probes.every((p) => p.ok) ? 'validation passed' : null)
 
-    const faultId = (incident.metadata as { faultId?: string } | null)?.faultId ?? null
-    if (faultId) deactivateFault(faultId)
-
     const telegram = await notifyTerminal(incident)
+    await traceScores(decision.validation.probes)
+    trace('FINAL', `${incident.ref} RESOLVED via auto-repair (${decision.record.patchId}) — telegram ${telegram.sent ? 'sent' : `not sent: ${telegram.reason}`}`, {
+      incidentRef: incident.ref,
+      incidentId: incident.id,
+      route: incident.endpoint,
+      method: incident.method,
+    })
 
     return {
       ok: true,
@@ -251,6 +325,22 @@ export async function runSelfHealingRepair(
   await persistLearning(incident, attempt, candidate, risk, 'ROLLED_BACK', evidence, decision.reason)
 
   const telegram = await notifyTerminal(incident)
+  await traceScores(decision.validation.probes)
+  // Report only what the rollback proved: `restoreVerified` is true when the
+  // read-back SHA-256 matched the backup, false when the restore was skipped
+  // or unverified, undefined when no file edit existed to restore.
+  const restoreNote =
+    decision.restoreVerified === true
+      ? 'original bytes restored and hash-verified'
+      : decision.restoreVerified === false
+        ? 'rollback restore UNVERIFIED — see ROLLBACK traces for details'
+        : 'no file changes to restore'
+  trace('FINAL', `${incident.ref} ROLLED_BACK — validation failed after apply; ${restoreNote}`, {
+    incidentRef: incident.ref,
+    incidentId: incident.id,
+    route: incident.endpoint,
+    method: incident.method,
+  })
 
   return {
     ok: false,
@@ -294,7 +384,32 @@ async function finalizeFailure(
   await persistLearning(incident, attempt, null, risk ?? 'LOW', stage as 'AI_REPAIR_FAILED', evidence, detail ?? conversation.humanBrief)
 
   const telegram = await notifyTerminal(incident)
+  trace('FINAL', `${incident.ref} AI_REPAIR_FAILED (stop=${conversation.stopReason}, ${conversation.roundsUsed} round(s)) — no safe candidate produced`, {
+    incidentRef: incident.ref,
+    incidentId: incident.id,
+    route: incident.endpoint,
+    method: incident.method,
+  })
+  await traceScores([])
   return { telegram }
+}
+
+/** Prints the recomputed score set (cyber safety / app reliability / total)
+ * after a terminal state so a judge can see that the score recovered (RESOLVED)
+ * and never recovered through a bare rollback. Best-effort, never throws. */
+async function traceScores(probes: Array<{ name: string; ok: boolean; expected: string; actual: string }>): Promise<void> {
+  try {
+    const overview = await computeOverview()
+    trace('SCORE', `post-terminal scores → risk ${overview.riskScore} · cyber ${overview.cyberSafetyScore} · reliability ${overview.applicationReliabilityScore} · health ${overview.systemHealth} · total ${overview.totalHealthScore} (active incidents ${overview.activeIncidents})`)
+    void probes
+  } catch (err) {
+    await logger.warn({
+      service: 'self-healing',
+      message: `Score recompute after repair failed: ${err instanceof Error ? err.message : 'unknown'}`,
+      status: 500,
+      errorCode: 'SCORE_RECOMPUTE_FAILED',
+    })
+  }
 }
 
 async function persistLearning(
@@ -341,6 +456,7 @@ async function persistLearning(
             currentCode: candidate.currentCode,
             proposedCode: candidate.proposedCode,
             risk,
+            decision: decisionLabelFor(risk, outcome),
           }
         : { decision: 'no-candidate', stopReason: outcome },
       nextState: { incidentStatus: incident.status, resolvedAt: incident.resolvedAt?.toISOString() ?? null },
@@ -446,34 +562,36 @@ export async function continueApprovedRepair(
     }
   }
 
-  const fault = incident.metadata
-    ? (() => { const m = incident.metadata as { faultId?: string } | null; return m?.faultId ? getFault(m.faultId) : null })()
-    : null
-  const faultId = incident.metadata ? ((incident.metadata as { faultId?: string }).faultId ?? null) : null
   const risk = (attempt.risk ?? classifyPatchRisk(incident, candidate.file).risk) as PatchRisk
 
   await prisma.incident.update({ where: { id: incident.id }, data: { status: 'VALIDATING' } })
   await updateAttemptStatus(attempt.id, 'APPLYING', { summary: `approved by ${approvalOperator}` })
 
-  void fault
-  const decision = await applyCandidate(attempt, {
-    incident,
-    faultId,
-    file: candidate.file,
-    line: candidate.line,
-    function: candidate.function,
-    currentCode: candidate.currentCode,
-    proposedCode: candidate.proposedCode,
-  })
+  const decision = candidate.runtimeRepair
+    ? await applyRuntimeRepair(attempt, incident, {
+        file: candidate.file,
+        directive: candidate.runtimeRepair,
+      })
+    : await applyCandidate(attempt, {
+        incident,
+        file: candidate.file,
+        line: candidate.line,
+        function: candidate.function,
+        currentCode: candidate.currentCode,
+        proposedCode: candidate.proposedCode,
+      })
 
   if (decision.ok) {
+    if (!candidate.runtimeRepair) {
+      const cleared = await deactivateFaultsForEndpoint(incident.endpoint, incident.method)
+      if (cleared.length) trace('PATCH', `runtime faults cleared post-approval-patch: ${cleared.join(', ')}`, { incidentRef: incident.ref, incidentId: incident.id })
+    }
+
     await prisma.incident.update({
       where: { id: incident.id },
       data: { status: 'RESOLVED', resolvedAt: new Date(), summary: `Approved & validated: ${candidate.diagnosis}` },
     })
     await updateAttemptStatus(attempt.id, 'RESOLVED', { risk, summary: `RESOLVED: ${candidate.diagnosis}`, completedAt: new Date(), patchState: { patchId: decision.record.patchId } })
-    const faultId = (incident.metadata as { faultId?: string } | null)?.faultId ?? null
-    if (faultId) deactivateFault(faultId)
     await consumeApproval(approval.approvalId)
     const telegramAdjusted = await notifyTerminal(incident)
     return {
@@ -515,6 +633,15 @@ export async function continueApprovedRepair(
   }
 }
 
+/** Action label persisted on each RepairExperience so the RL decision layer
+ * can group by the action actually taken (and for outcome/risk → label). */
+function decisionLabelFor(risk: PatchRisk, outcome: string): string {
+  if (risk === 'HIGH') return 'REQUEST_HUMAN'
+  if (outcome === 'RESOLVED') return 'AUTO_REPAIR'
+  if (outcome === 'ROLLED_BACK' || outcome === 'AI_REPAIR_FAILED') return 'RETRY_ANALYSIS'
+  return 'REJECT_REPAIR'
+}
+
 /** Pulls the accepted candidate back out of the attempt's last CODER AgentRun. */
 async function loadFinalCandidate(incident: Incident): Promise<CoderOutput | null> {
   const lastCoder = await prisma.agentRun.findFirst({
@@ -535,5 +662,6 @@ async function loadFinalCandidate(incident: Incident): Promise<CoderOutput | nul
     proposedCode: parsed.proposedCode,
     validationPlan: parsed.validationPlan ?? '',
     confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 50,
+    runtimeRepair: parsed.runtimeRepair === 'restore' || parsed.runtimeRepair === 'none' ? parsed.runtimeRepair : undefined,
   }
 }

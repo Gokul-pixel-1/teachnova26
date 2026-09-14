@@ -3,7 +3,6 @@ import { NextResponse } from 'next/server'
 import { requireSecurityOperator } from '@/lib/server/security'
 import { logger, resolveRequestId } from '@/lib/server/logger'
 import { errorResponse, handleApiError, firstZodIssue } from '@/lib/server/response'
-import { createFaultIncident } from '@/lib/server/repair/ingest'
 import { 
   isFaultInjectionEnabled, 
   getFaultRegistry, 
@@ -12,7 +11,7 @@ import {
   deactivateFault, 
   deactivateAllFaults,
   getActiveFaults,
-  applyFaultPatch
+  reconcileActiveFaults,
 } from '@/lib/server/fault-injection'
 import { z } from 'zod'
 
@@ -24,6 +23,9 @@ export async function GET() {
     })
   }
 
+  // A real self-healing repair edits the file directly; the in-memory registry
+  // must reflect what is actually present on disk.
+  await reconcileActiveFaults()
   const faults = getFaultRegistry()
   const active = getActiveFaults()
   
@@ -41,10 +43,6 @@ export async function GET() {
     }))
   })
 }
-
-const activateSchema = z.object({
-  faultId: z.string().min(1).max(32)
-})
 
 const actionSchema = z.object({
   faultId: z.string().min(1).max(32).optional(),
@@ -74,28 +72,32 @@ export async function POST(request: Request) {
 
   try {
     const { faultId, action = 'activate' } = parsed.data
-    
+
     let result: { ok: boolean; error?: string }
-    
+
     if (action === 'deactivate') {
       if (!faultId) return errorResponse('faultId required for deactivate', 400)
-      result = deactivateFault(faultId)
+      result = await deactivateFault(faultId)
     } else if (action === 'deactivate-all') {
-      deactivateAllFaults()
+      await deactivateAllFaults()
       result = { ok: true }
     } else {
       if (!faultId) return errorResponse('faultId required for activate', 400)
-      result = activateFault(faultId)
-      if (result.ok) {
-        applyFaultPatch(faultId)
-        const incident = await createFaultIncident(faultId)
+      result = await activateFault(faultId)
+      if (result.ok && getFault(faultId)) {
+        const fault = getFault(faultId)!
+        // The defect now lives in the real source file. No incident is
+        // fabricated here: a real failed request must surface first, then the
+        // log monitor turns the ERROR log into an incident.
         return NextResponse.json({
           success: true,
           faultId,
           action,
-          incident: incident
-            ? { id: incident.id, ref: incident.ref, status: incident.status, severity: incident.severity }
-            : null,
+          defect: {
+            file: fault.target.file,
+            line: fault.target.line,
+            function: fault.target.function,
+          },
         })
       }
     }

@@ -4,6 +4,7 @@ import { getSessionUser } from '@/lib/server/auth'
 import { prisma } from '@/lib/server/db'
 import { logger } from '@/lib/server/logger'
 import { errorResponse, handleApiError } from '@/lib/server/response'
+import { continueApprovedRepair } from '@/lib/server/repair/engine'
 
 export async function POST(
   request: Request,
@@ -53,18 +54,11 @@ export async function POST(
       return errorResponse('Approval is not APPROVED.', 400)
     }
 
-    // Apply the patch - in the real system this would be a sandboxed apply
-    // For now, we'll update the incident status and simulate the apply
-    await prisma.incident.update({
-      where: { id: incidentId },
-      data: {
-        status: 'VALIDATING',
-        summary: pendingApproval.patchId,
-      },
-    })
+    // Run the real approved repair: apply the candidate to the real file,
+    // re-run the failing request, resolve or roll back.
+    const repair = await continueApprovedRepair(pendingApproval.approvalId, 'security-operator')
 
-    // Record the patch applied event
-    const eventDetail = 'Patch ' + pendingApproval.patchId + ' applied with approval ' + pendingApproval.approvalId
+    const eventDetail = `Patch ${repair.candidateFile ?? pendingApproval.patchId} applied with approval ${pendingApproval.approvalId} (${repair.stage})`
     await prisma.incidentEvent.create({
       data: {
         incidentId,
@@ -76,7 +70,7 @@ export async function POST(
 
     await logger.info({
       service: 'incident',
-      message: 'Patch applied awaiting validation',
+      message: `Approved patch applied: ${repair.stage}`,
       route: '/api/incidents/[id]/apply-patch',
       method: 'POST',
       status: 200,
@@ -88,9 +82,10 @@ export async function POST(
     return NextResponse.json({
       approved: true,
       approvalId: pendingApproval.approvalId,
-      patchId: pendingApproval.patchId,
-      status: 'AWAITING_VALIDATION',
-      message: 'Patch applied. Validation in progress.',
+      patchId: repair.candidateFile ?? pendingApproval.patchId,
+      status: repair.stage,
+      message: `Patch applied. ${repair.stage}.`,
+      rollback: repair.rollback,
     })
   } catch (err) {
     return handleApiError(err)

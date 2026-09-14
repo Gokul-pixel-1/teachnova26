@@ -16,7 +16,7 @@ export type IncidentSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
 
 export type LogLevel = 'INFO' | 'WARN' | 'ERROR' | 'SECURITY'
 
-export type AgentName = 'FIXER' | 'CRITIC' | 'JUDGE'
+export type AgentName = 'FIXER' | 'CRITIC' | 'JUDGE' | 'CODER' | 'ANALYZER'
 
 export type AgentStatus =
   | 'QUEUED'
@@ -34,6 +34,8 @@ export interface Overview {
   riskScore: number
   cyberSafetyScore: number
   systemHealth: number
+  applicationReliabilityScore: number
+  totalHealthScore: number
   activeIncidents: number
 }
 
@@ -99,6 +101,9 @@ export interface AgentRunDTO {
   mode: string
   model: string | null
   error: string | null
+  promptTokens: number | null
+  contextSize: number | null
+  contextLevel: number | null
   completedAt: string | null
   createdAt: string
 }

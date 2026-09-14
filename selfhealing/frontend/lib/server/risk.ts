@@ -86,6 +86,8 @@ export interface SecurityOverview {
   riskScore: number
   cyberSafetyScore: number
   systemHealth: number
+  applicationReliabilityScore: number
+  totalHealthScore: number
   activeIncidents: number
   activeFindings: number
   findingsBySeverity: Record<string, number>
@@ -122,6 +124,8 @@ export async function computeSecurityOverview(): Promise<SecurityOverview> {
     riskScore: demo.riskScore,
     cyberSafetyScore: demo.cyberSafetyScore,
     systemHealth,
+    applicationReliabilityScore: demo.applicationReliabilityScore,
+    totalHealthScore: demo.totalHealthScore,
     activeIncidents: activeIncidents.length,
     activeFindings: findings.length,
     findingsBySeverity,

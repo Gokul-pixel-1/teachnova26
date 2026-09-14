@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 
 import { requireSecurityOperator, runAgentPipeline } from '@/lib/server/security'
 import { runSelfHealingRepair } from '@/lib/server/repair/engine'
+import { isRepairInFlight } from '@/lib/server/repair/auto-trigger'
 import { prisma } from '@/lib/server/db'
 import { errorResponse, firstZodIssue, handleApiError } from '@/lib/server/response'
 import { logger, resolveRequestId } from '@/lib/server/logger'
@@ -9,11 +10,13 @@ import { runPipelineSchema } from '@/lib/validation'
 
 // Phase 9 — repairs incidents.
 //
-// Fault-triggered incidents (incident.metadata.faultId) run the full
-// self-healing conversation engine (evidence → Coder/Critic → Judge → risk →
-// patch → validation → resolve/rollback). Security incidents keep the legacy
-// single-pass Fixer/Critic/Judge analysis pipeline. Nothing is faked: model
-// failures are recorded as AI UNAVAILABLE / AI_REPAIR_FAILED.
+// Runtime incidents discovered from REAL ERROR logs by the log monitor
+// (incident.metadata.source === 'log-monitor') — and any legacy fault-triggered
+// incident — run the full self-healing conversation engine (evidence →
+// Coder/Critic → Judge → risk → patch → validation → resolve/rollback).
+// Security-log-analyzer incidents keep the legacy single-pass
+// Fixer/Critic/Judge analysis pipeline. Nothing is faked: model failures are
+// recorded as AI UNAVAILABLE / AI_REPAIR_FAILED.
 export async function POST(request: Request) {
   const requestId = resolveRequestId(request)
 
@@ -39,9 +42,24 @@ export async function POST(request: Request) {
     })
     if (!incident) return errorResponse('Incident not found.', 404)
 
-    const faultId = ((incident.metadata ?? null) as { faultId?: string } | null)?.faultId ?? null
+    const metadata = (incident.metadata ?? null) as { source?: string; faultId?: string } | null
+    const isRuntime = metadata?.source === 'log-monitor' || Boolean(metadata?.faultId)
 
-    const result = faultId
+    // Never let a manual run and an automatic run race on the SAME incident:
+    // the auto-trigger may already be repairing it in the background.
+    if (isRuntime && isRepairInFlight(parsed.data.incidentId)) {
+      return NextResponse.json(
+        {
+          ok: false,
+          incidentRef: incident.ref,
+          stage: 'ALREADY_RUNNING',
+          error: 'A repair is already running for this incident.',
+        },
+        { status: 409 },
+      )
+    }
+
+    const result = isRuntime
       ? await runSelfHealingRepair(incident.id, { scenario: parsed.data.scenario })
       : await runAgentPipeline(incident.id)
 
@@ -53,7 +71,7 @@ export async function POST(request: Request) {
       status: 200,
       requestId,
       incidentId: parsed.data.incidentId,
-      errorCode: faultId ? null : (result as { aiUnavailable?: boolean }).aiUnavailable ? 'AI_UNAVAILABLE' : null,
+      errorCode: isRuntime ? null : (result as { aiUnavailable?: boolean }).aiUnavailable ? 'AI_UNAVAILABLE' : null,
     })
 
     return NextResponse.json(result)

@@ -3,7 +3,7 @@ import { SecurityClient } from '@/components/command/security-client'
 
 export const metadata: Metadata = {
   title: 'Command Center — Security',
-  description: 'BuildHub live security posture: findings, incidents and the real Groq analysis pipeline.',
+  description: 'BuildHub live security posture: findings, incidents and the real AI self-healing pipeline.',
 }
 
 export default function AiSecurityPage() {

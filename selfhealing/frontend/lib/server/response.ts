@@ -3,6 +3,7 @@ import 'server-only'
 import { NextResponse } from 'next/server'
 import { Prisma } from '@prisma/client'
 import type { ZodError } from 'zod'
+import { logApiError, resolveRequestId } from './logger'
 
 export function errorResponse(message: string, status: number) {
   return NextResponse.json({ error: message }, { status })
@@ -37,6 +38,44 @@ export function handleApiError(err: unknown) {
     return errorResponse(DEFAULT_SERVER_ERROR, 500)
   }
   return errorResponse(DEFAULT_SERVER_ERROR, 500)
+}
+
+/**
+ * Error path used by route handlers: returns the same safe HTTP response as
+ * `handleApiError` AND records the real runtime failure as a structured ERROR
+ * LogEvent (errorName, message, stackTrace, sourceFile/sourceLine, requestId,
+ * route, method, status). Discovery by the log monitor depends on this.
+ *
+ * Status is derived from the translated response so 4xx contract errors
+ * (e.g. 409 duplicate) are logged accurately while unhandled exceptions stay 500.
+ */
+export function handleRouteError(
+  err: unknown,
+  request: Request,
+  meta: { route?: string; method?: string; service?: string; errorCode?: string } = {},
+): NextResponse {
+  const response = handleApiError(err)
+  const route = meta.route ?? urlPath(request.url)
+  const method = meta.method ?? request.method
+  const requestId = resolveRequestId(request) ?? undefined
+  logApiError(err, {
+    service: meta.service ?? 'api',
+    route,
+    method,
+    status: response.status,
+    requestId,
+    errorCode: meta.errorCode,
+  })
+  return response
+}
+
+export function urlPath(url: string): string {
+  try {
+    const u = new URL(url)
+    return `${u.pathname}${u.search}`
+  } catch {
+    return url
+  }
 }
 
 function uniqueTarget(err: Prisma.PrismaClientKnownRequestError): string {

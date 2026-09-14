@@ -11,6 +11,7 @@ import {
 } from '@/lib/server/risk'
 import { securityOperators, isSecurityOperator } from '@/lib/server/security'
 import { offeredModels, configuredModel } from '@/lib/server/ai'
+import { aiProviderName, providerModeLabel } from '@/lib/server/provider'
 import { telegramConfig, checkTelegramConnectivity } from '@/lib/server/telegram'
 
 // Phase 8 — live security status for the command center. Any authenticated user
@@ -147,7 +148,8 @@ export async function GET(request: Request) {
       })),
       agents: agentStats,
       model: {
-        provider: process.env.AI_PROVIDER ?? 'groq',
+        provider: aiProviderName(),
+        mode: providerModeLabel(),
         configured,
         offered,
         valid: modelValid,

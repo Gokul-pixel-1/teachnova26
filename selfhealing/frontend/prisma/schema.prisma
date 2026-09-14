@@ -149,6 +149,7 @@ enum LogLevel {
 }
 
 enum AgentName {
+  ANALYZER
   FIXER
   CRITIC
   JUDGE
@@ -387,6 +388,12 @@ model LogEvent {
   status     Int?
   requestId  String?
   errorCode  String?
+  // Real runtime failure capture (used by the log monitor to create incidents
+  // from genuine ERROR events — never populated from the fault catalog).
+  errorName  String?
+  stackTrace String?
+  sourceFile String?
+  sourceLine Int?
   incidentId String?
   incident   Incident?  @relation(fields: [incidentId], references: [id], onDelete: SetNull)
   createdAt  DateTime   @default(now())
@@ -446,6 +453,10 @@ model PatchRecord {
   status           String    @default("CHECKPOINTED")
   originalContent  String?
   appliedContent   String?
+  restoredContent  String?
+  originalSha256   String?
+  appliedSha256    String?
+  restoredSha256   String?
   risk             String?
   requiresApproval Boolean   @default(false)
   approvalId       String?

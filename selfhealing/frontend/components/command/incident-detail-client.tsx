@@ -12,6 +12,7 @@ import type {
 } from '@/lib/api/observability'
 import { useAsync } from '@/lib/hooks'
 import { subscribeSecurityEvents } from '@/lib/api/security'
+import { submitApprovalDecision } from '@/lib/api/security'
 import {
   Card,
   CardHeader,
@@ -33,6 +34,8 @@ import {
 export function IncidentDetailClient({ id }: { id: string }) {
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
+  const [action, setAction] = useState<'proceed' | 'reject' | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const fetcher = useCallback(() => fetchIncident(id).then((res) => res.incident), [id])
   const { data: incident, loading, error, refetch } = useAsync<IncidentDetailDTO>(fetcher)
@@ -42,6 +45,22 @@ export function IncidentDetailClient({ id }: { id: string }) {
     ['DETECTED', 'INVESTIGATING', 'AWAITING_REVIEW', 'VALIDATING', 'WAITING_APPROVAL'].includes(
       incident.status,
     )
+
+  const pendingApprovals =
+    incident?.approvals.filter((a) => a.status === 'PENDING' && a.decision === null) ?? []
+
+  const handleApproval = async (approvalId: string, decision: 'proceed' | 'reject') => {
+    setAction(decision)
+    setActionError(null)
+    try {
+      await submitApprovalDecision(approvalId, decision)
+      refetch()
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not process the approval decision.')
+    } finally {
+      setAction(null)
+    }
+  }
 
   // Live refresh: the SSE lifecycle stream drives immediate refetches as agent
   // runs / repairs land for this incident, with a polling fallback so the detail
@@ -323,6 +342,56 @@ export function IncidentDetailClient({ id }: { id: string }) {
           title="Human Approval History"
           hint="workflow decisions only — nothing is applied without these"
         />
+        {pendingApprovals.length > 0 && (
+          <div
+            className="space-y-3 border-b border-bh-line bg-bh-surface-2/40 px-4 py-4"
+            role="group"
+            aria-label="Approval decision"
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="flex h-2 w-2 rounded-full bg-bh-warning" aria-hidden="true" />
+              <p className="text-sm font-medium text-bh-ink">
+                {pendingApprovals.length === 1
+                  ? `Patch ${pendingApprovals[0]?.patchId ?? ''} is awaiting your decision`
+                  : `${pendingApprovals.length} patches are awaiting your decision`}
+              </p>
+            </div>
+            <p className="text-xs leading-relaxed text-bh-muted">
+              PROCEED applies this HIGH-risk candidate, then runs live validation probes and rolls
+              back on failure. REJECT closes the incident without applying any code change.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {pendingApprovals.map((approval) => (
+                <div key={approval.id} className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => void handleApproval(approval.approvalId, 'proceed')}
+                    disabled={action !== null}
+                    className="flex h-8 items-center gap-1.5 rounded-md bg-bh-accent px-3 text-xs font-medium text-white hover:bg-bh-accent-strong disabled:opacity-60"
+                  >
+                    <Icon name="shield" size={13} />
+                    {action === 'proceed' ? 'Applying…' : 'PROCEED'}
+                  </button>
+                  <button
+                    onClick={() => void handleApproval(approval.approvalId, 'reject')}
+                    disabled={action !== null}
+                    className="flex h-8 items-center gap-1.5 rounded-md border border-bh-line px-3 text-xs font-medium text-bh-muted hover:border-bh-danger/50 hover:text-bh-danger disabled:opacity-60"
+                  >
+                    <Icon name="x" size={13} />
+                    REJECT
+                  </button>
+                  <span className="ml-1 font-mono text-[11px] text-bh-faint">
+                    {approval.approvalId}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {actionError && (
+              <p className="text-xs text-bh-danger" role="alert">
+                {actionError}
+              </p>
+            )}
+          </div>
+        )}
         {incident.approvals.length === 0 ? (
           <EmptyState
             icon="shield"
@@ -577,6 +646,7 @@ function AgentRunRow({ run }: { run: AgentRunDTO }) {
         <span className="flex items-center gap-2">
           <span className="font-mono text-[10px] text-bh-faint">
             {run.mode === 'TEST' ? 'TEST' : run.model ?? ''}
+            {run.contextSize != null ? ` · ${run.contextSize} tok ctx` : ''}
           </span>
           <span className={cn('text-[11px] font-semibold', agentStatusTone(run.status))}>
             {run.status}

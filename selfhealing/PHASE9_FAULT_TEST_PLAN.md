@@ -330,9 +330,11 @@ curl -X POST http://localhost:3000/api/faults/deactivate \
 After all faults tested:
 
 ```bash
-# Run full Phase 9 verification (VERIFIED: 80 passed, 0 failed)
+# Run full Phase 9 verification (VERIFIED: 103 passed, 0 failed)
 node scripts/verify-self-healing.mjs
-# Browser E2E Phase 9 (VERIFIED: 64 passed, 0 failed — requires server + DB seeded)
+# Portable HTTP E2E, real fault → incident → engine (VERIFIED: 69 passed, 0 failed)
+python3 scripts/e2e_real_self_healing.py
+# Browser E2E Phase 9 (requires Playwright)
 python3 scripts/e2e_phase9_full.py
 # Browser E2E Phase 10 — learning loop (VERIFIED: 50 passed, 0 failed)
 python3 scripts/e2e_phase10_learning.py

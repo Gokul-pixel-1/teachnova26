@@ -7,7 +7,7 @@ import 'server-only'
 // across Groq (REAL) and the test provider (TEST, hermetic).
 // ---------------------------------------------------------------------------
 
-export type AgentRole = 'CODER' | 'CRITIC' | 'JUDGE'
+export type AgentRole = 'ANALYZER' | 'CODER' | 'CRITIC' | 'JUDGE'
 export type ProviderName = 'groq' | 'test' | 'ollama' | 'none'
 export type ModeLabel = 'REAL' | 'TEST'
 
@@ -28,10 +28,12 @@ export interface EvidenceLog {
 }
 
 /**
- * Everything the agents may legitimately see. `sourceContext` is the sandbox
- * "current" view of the defect-bearing source; it never contains fault IDs or
- * registry answers, so the model must reason from the same evidence a real
- * operator would have.
+ * Everything the agents may legitimately see. `sourceContext` is the REAL
+ * defect-bearing source rendered from the stack trace's first app frame with
+ * line numbers; it contains no fault ids or registry answers, so the model must
+ * reason from the same evidence a real operator would have. `architectureDoc`
+ * is a capped excerpt of docs/SELF_HEALING_ARCHITECTURE.md (the component map
+ * the engine reads before repairing).
  */
 export interface RepairEvidence {
   incidentRef: string
@@ -50,6 +52,7 @@ export interface RepairEvidence {
   logs: EvidenceLog[]
   stackTrace: string | null
   sourceContext: string | null
+  architectureDoc: string | null
   memoryHints: { rootCause: string; patchSummary: string; outcome: string }[]
 }
 
@@ -64,6 +67,17 @@ export interface CoderOutput {
   proposedCode: string
   validationPlan: string
   confidence: number
+  /**
+   * Runtime fault repair directive. When the REAL source is healthy but the
+   * failure is produced by an active controlled runtime fault, the Coder
+   * directs the engine to restore normal runtime behavior instead of applying
+   * a file patch:
+   *   'restore' → deactivate the runtime fault(s) for the incident endpoint.
+   *   'none'    → behave as if no repair is applied (used by bad-fix tests so
+   *               REAL validation probes fail and the engine rolls back).
+   * Absent → an ordinary file-patch candidate (anchor-based apply).
+   */
+  runtimeRepair?: 'restore' | 'none'
 }
 
 export interface CriticOutput {
@@ -85,21 +99,14 @@ export interface JudgeOutput {
 
 export type AnyAgentOutput = CoderOutput | CriticOutput | JudgeOutput
 
-/** Safe metadata the engine may pass to a provider. In TEST mode only it may
- * include a `fault` sandbox answer so hermetic tests are deterministic; Groq
- * (REAL) never receives it. */
+/** Safe metadata the engine may pass to a provider. In TEST mode the real
+ * repair evidence is included so the hermetic provider can reason deterministically
+ * from the SAME evidence a real model would see. No fault answers exist anymore. */
 export interface ProviderContext {
   role: AgentRole
   round: number
   scenario?: string
-  fault?: {
-    id: string
-    file: string
-    line: number | null
-    function: string
-    originalCode: string
-    faultCode: string
-  }
+  evidence?: RepairEvidence
 }
 
 export interface ProviderCall {

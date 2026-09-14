@@ -298,7 +298,7 @@ export function SecurityClient() {
       )}
 
       {/* Score cards */}
-      <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 xl:grid-cols-3">
         <Card className="relative p-4">
           <p className="text-xs font-medium uppercase tracking-wider text-bh-faint">Risk score</p>
           <p
@@ -307,7 +307,7 @@ export function SecurityClient() {
           >
             {data.overview.riskScore}
           </p>
-          <p className="mt-1 text-xs text-bh-muted">composite, 0–100</p>
+          <p className="mt-1 text-xs text-bh-muted">composite, 0–100 (lower is safer)</p>
         </Card>
         <Card className="relative p-4">
           <p className="text-xs font-medium uppercase tracking-wider text-bh-faint">Cyber safety</p>
@@ -319,11 +319,27 @@ export function SecurityClient() {
           </p>
         </Card>
         <Card className="relative p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-bh-faint">App reliability</p>
+          <p className="mt-1.5 text-3xl font-semibold tabular-nums tracking-tight">
+            {data.overview.applicationReliabilityScore}
+          </p>
+          <p className="mt-1 text-xs text-bh-muted">
+            {data.overview.applicationReliabilityScore >= 80 ? 'endpoints healthy' : 'endpoint failures active'}
+          </p>
+        </Card>
+        <Card className="relative p-4">
           <p className="text-xs font-medium uppercase tracking-wider text-bh-faint">Health</p>
           <p className="mt-1.5 text-3xl font-semibold tabular-nums tracking-tight">
             {data.overview.systemHealth}%
           </p>
           <p className="mt-1 text-xs text-bh-muted">component availability</p>
+        </Card>
+        <Card className="relative p-4">
+          <p className="text-xs font-medium uppercase tracking-wider text-bh-faint">Total health</p>
+          <p className="mt-1.5 text-3xl font-semibold tabular-nums tracking-tight">
+            {data.overview.totalHealthScore}
+          </p>
+          <p className="mt-1 text-xs text-bh-muted">weighted cyber + reliability + health</p>
         </Card>
         <Card className="relative p-4">
           <p className="text-xs font-medium uppercase tracking-wider text-bh-faint">Active</p>
@@ -376,7 +392,7 @@ export function SecurityClient() {
 
         {/* AI + conduit status */}
         <Card>
-          <CardHeader icon="sparkles" title="AI + Alerting" hint="real Groq pipeline · Telegram" />
+          <CardHeader icon="sparkles" title="AI + Alerting" hint="provider-bound · Telegram" />
           <div className="space-y-3 px-4 py-4 text-xs">
             <div className="flex items-start gap-2">
               <Icon
@@ -390,12 +406,18 @@ export function SecurityClient() {
               <div>
                 <p className="font-medium text-bh-ink">Model: {data.model.configured}</p>
                 <p className="text-bh-faint">
-                  provider {data.model.provider} ·{' '}
-                  {data.model.valid === null
-                    ? 'catalog unreachable'
-                    : data.model.valid
-                      ? 'validated against Groq'
-                      : 'NOT in Groq catalog'}
+                  provider {data.model.provider} · mode={data.model.mode}
+                  {data.model.provider === 'ollama'
+                    ? data.model.valid === null
+                      ? ' · Ollama not reachable'
+                      : data.model.valid
+                        ? ' · available locally (Ollama)'
+                        : ` · "${data.model.configured}" not pulled`
+                    : data.model.valid === null
+                      ? ' · catalog unreachable'
+                      : data.model.valid
+                        ? ' · validated against Groq catalog'
+                        : ' · NOT in Groq catalog'}
                 </p>
               </div>
             </div>
@@ -462,7 +484,7 @@ export function SecurityClient() {
                   <p className="font-medium text-bh-ink">
                     {data.agents.COMPLETE ?? 0} agent run{data.agents.COMPLETE === 1 ? '' : 's'} complete
                   </p>
-                  <p className="text-bh-faint">mode=REAL via Groq</p>
+                  <p className="text-bh-faint">mode={data.model.mode} via {data.model.provider}</p>
                 </div>
               </div>
             )}
@@ -523,16 +545,20 @@ export function SecurityClient() {
                     {incident.method} {incident.endpoint}
                   </span>
                   {data.canOperate &&
-                    incident.agentRuns.some(
+                    (incident.agentRuns.some(
                       (r) => r.status === 'QUEUED' || r.status === 'FAILED',
-                    ) && (
+                    ) ||
+                      (incident.status === 'DETECTED' && incident.agentRuns.length === 0)) && (
                       <button
                         onClick={() => void runOn(incident)}
                         disabled={busy}
                         className="ml-auto flex h-7 items-center gap-1.5 rounded-md bg-bh-accent px-2.5 text-xs font-medium text-white hover:bg-bh-accent-strong disabled:opacity-60"
                       >
                         <Icon name="refresh" size={12} />
-                        {incident.agentRuns.some((r) => r.status === 'QUEUED') ? 'Run pipeline' : 'Retry'}
+                        {incident.agentRuns.length === 0 ||
+                        incident.agentRuns.some((r) => r.status === 'QUEUED')
+                          ? 'Run pipeline'
+                          : 'Retry'}
                       </button>
                     )}
                 </div>

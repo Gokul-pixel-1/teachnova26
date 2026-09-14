@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# durable runtime fault state (client-editable, must not be committed)
+/.data/

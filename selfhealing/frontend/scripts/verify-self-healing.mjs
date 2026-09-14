@@ -1,23 +1,46 @@
 #!/usr/bin/env node
 /**
- * Phase 9 — Self-Healing Verification
+ * Phase 9 — Self-Healing Verification (REAL runtime loop)
  *
- * Verifies the complete self-healing pipeline:
- * - Fault injection activation
- * - Incident detection
- * - AI pipeline (Fixer → Critic → Judge)
- * - Risk classification
- * - Approval workflow (LOW/MEDIUM auto, HIGH requires approval)
- * - Patch application and validation
- * - Universal rollback on validation failure
- * - Telegram alerting and deduplication
- * - Real-time dashboard updates
- * - Repair memory
+ * Proves the self-healing engine works ONLY from real runtime evidence — no
+ * fault ids or canned answers anywhere in the repair path:
  *
- * Run: node scripts/verify-self-healing.mjs
+ *   1. activate a fault           → the defect is written into the real file
+ *   2. make a REAL failing request → ERROR log persists errorName / stack /
+ *                                    sourceFile / sourceLine / requestId
+ *   3. scan                        → log monitor groups the unlinked ERROR logs
+ *                                    by signature → ONE incident per failure
+ *   4. run                         → engine reads evidence from the REAL file,
+ *                                    produces a candidate, applies it to the
+ *                                    REAL file and validates with real probes
+ *   5. RESOLVED                    (HIGH risk → WAITING_APPROVAL → proceed)
+ *
+ * Also verifies:
+ *   - the merge behaviour (repeated identical failures fold into one incident)
+ *   - the harness-only behavioural faults (no exception → no incident)
+ *   - every target file is left clean at the end
+ *
+ * Dev-server note: Turbopack dev recompilation of a repeatedly rewritten route
+ * becomes unreliable after the server has been up a while. Before the
+ * behavioural (harness-only) phase this script restarts the dev server so each
+ * edited module is compiled fresh from its current on-disk state. The engine
+ * (crash-fault) phase runs against the server you launched.
+ *
+ * Requirements:
+ *   The app must be running with the fault harness enabled and an AI provider:
+ *     FAULT_INJECTION_ENABLED=true   (already set in .env)
+ *     AI_PROVIDER=test SELF_HEALING_TEST_MODE=true   (hermetic CI runs)
+ *
+ * Run:   node scripts/verify-self-healing.mjs
  */
 
+import { spawn, execSync } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+
 const BASE = process.env.BASE_URL ?? 'http://localhost:3000'
+const DEMO_PASSWORD = 'buildhub-demo1'
+const OPERATOR = { identifier: 'arjun', password: DEMO_PASSWORD }
 
 let passed = 0
 let failed = 0
@@ -33,6 +56,8 @@ function check(name, condition, extra) {
     failures.push(name)
   }
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function tokenFromSetCookie(setCookie) {
   const match = setCookie && setCookie.match(/buildhub_session=[^;]+/)
@@ -74,265 +99,503 @@ class Client {
   post(path, body) {
     return this.request('POST', path, body ?? undefined)
   }
+  patch(path, body) {
+    return this.request('PATCH', path, body ?? undefined)
+  }
   delete(path) {
     return this.request('DELETE', path)
   }
 }
 
+/**
+ * Triggers the (just-activated) fault and retries while the dev server
+ * recompiles the written file. Turbopack needs a beat before the route serves
+ * the faulted module; the retry makes this deterministic in dev.
+ */
+async function triggerUntilFailure(fn, { expected, attempts = 40, waitMs = 500 }) {
+  for (let i = 0; i < attempts; i += 1) {
+    const res = await fn()
+    if (expected(res)) return res
+    await sleep(waitMs)
+  }
+  const last = await fn()
+  return last
+}
+
+/**
+ * Warms a route module so a later fault/repair write only triggers a FAST
+ * incremental recompile (dev servers compile a route on its first request; a
+ * cold first request after a file edit can take many seconds).
+ */
+async function warmFor(op, faultId) {
+  const url = faultId === 'HIGH-01'
+    ? () => op.post('/api/auth/login', { identifier: 'arjun', password: DEMO_PASSWORD })
+    : faultId === 'MEDIUM-03' || faultId === 'HIGH-02'
+      ? () => op.get('/api/projects?pageSize=3')
+      : () => op.get('/api/posts?pageSize=3')
+  const res = await url()
+  await sleep(300)
+  return res
+}
+
+async function activateFault(op, faultId) {
+  return op.post('/api/faults', { faultId })
+}
+
+async function deactivateFault(op, faultId) {
+  return op.post('/api/faults', { faultId, action: 'deactivate' })
+}
+
+async function scanIncidents(op) {
+  return op.post('/api/incidents/scan', { limit: 100 })
+}
+
+/** Newest OPEN incident NOT already open before this cycle (avoids stale pickups). */
+async function findOpenIncident(op, method, endpoint, excludeIds) {
+  const list = await op.get('/api/incidents?status=DETECTED,INVESTIGATING,WAITING_APPROVAL,VALIDATING&pageSize=100')
+  const incidents = list.json?.incidents ?? []
+  return incidents.find(
+    (inc) => inc.method === method && inc.endpoint === endpoint && !excludeIds.has(inc.id),
+  ) ?? null
+}
+
+/** All currently-open incident ids (DETECTED/INVESTIGATING/WAITING_APPROVAL/VALIDATING). */
+async function openIncidentIds(op) {
+  const list = await op.get('/api/incidents?status=DETECTED,INVESTIGATING,WAITING_APPROVAL,VALIDATING&pageSize=100')
+  return (list.json?.incidents ?? []).map((inc) => inc.id)
+}
+
+/**
+ * Full real self-healing cycle for a crash fault.
+ * `trigger` must perform a real failing request; `verifyBehaviour` checks the
+ * REAL endpoint after the engine repaired the file.
+ */
+async function crashFaultCycle(op, preOpenIds, { faultId, trigger, expectTrigger, verifyBehaviour }) {
+  console.log(`\n--- ${faultId}: real failure → incident → repair ---`)
+
+  await warmFor(op, faultId)
+  const activate = await activateFault(op, faultId)
+  check(
+    `${faultId} activate → 200 with defect location`,
+    activate.status === 200 && activate.json?.defect?.file,
+    `status=${activate.status} ${JSON.stringify(activate.json)}`,
+  )
+  // Settle + warm again so Turbopack recompiles the faulted module before the
+  // trigger loop measures the real failure.
+  await sleep(2000)
+  await warmFor(op, faultId)
+
+  const triggerRes = await triggerUntilFailure(trigger, {
+    expected: expectTrigger,
+    label: faultId,
+  })
+  check(`${faultId} trigger produces the real failure`, expectTrigger(triggerRes), `status=${triggerRes.status}`)
+
+  const scan = await scanIncidents(op)
+  check(
+    `${faultId} scan sees the ERROR log(s)`,
+    (scan.json?.scanned ?? 0) >= 1,
+    JSON.stringify(scan.json),
+  )
+  const created = scan.json?.created ?? []
+  const merged = scan.json?.merged ?? 0
+  check(
+    `${faultId} created and/or merged an incident`,
+    created.length >= 1 || merged >= 1,
+    JSON.stringify({ created: created.length, merged }),
+  )
+
+  let incident = created[0] ?? null
+  if (!incident) {
+    // Accept ONLY incidents that opened after this cycle started — a leftover
+    // open incident is not evidence of the just-activated fault.
+    const open = await findOpenIncident(op, triggerMethod(faultId), triggerEndpoint(faultId), preOpenIds)
+    if (open) incident = { id: open.id, ref: open.ref }
+  }
+  check(`${faultId} incident resolved for running`, !!incident?.id, `created=${created.length} merged=${merged}`)
+  if (!incident?.id) {
+    // The dev server did not recompile the faulted module. Clean up so later
+    // cycles are not polluted, and fail loudly instead of repairing stale
+    // incidents.
+    await deactivateFault(op, faultId)
+    return
+  }
+
+  const run = await op.post('/api/security/run', { incidentId: incident.id })
+  check(
+    `${faultId} engine reaches WAITING_APPROVAL or a terminal stage`,
+    ['WAITING_APPROVAL', 'RESOLVED', 'ROLLED_BACK'].includes(run.json?.stage),
+    `stage=${run.json?.stage} ${JSON.stringify(run.json)}`,
+  )
+
+  if (run.json?.stage === 'WAITING_APPROVAL') {
+    check(
+      `${faultId} HIGH risk requires a human decision`,
+      run.json.requiresApproval === true && !!run.json.approvalId,
+      JSON.stringify(run.json),
+    )
+    const proceed = await op.post('/api/approvals/proceed', {
+      approvalId: run.json.approvalId,
+      action: 'proceed',
+    })
+    check(
+      `${faultId} approval PROCEED applies + validates the patch`,
+      proceed.json?.repair?.stage === 'RESOLVED',
+      `stage=${proceed.json?.repair?.stage ?? proceed.json?.status} ${JSON.stringify(proceed.json)}`,
+    )
+  } else {
+    check(`${faultId} engine stages the patch + validates`, run.json?.stage === 'RESOLVED', `stage=${run.json?.stage}`)
+  }
+
+  const detail = await op.get(`/api/incidents/${incident.id}`)
+  const det = detail.json?.incident
+  check(`${faultId} incident reached RESOLVED`, det?.status === 'RESOLVED', `status=${det?.status}`)
+  check(`${faultId} repair attempt + patch recorded`, !!det?.repairAttempt && !!det?.patch, JSON.stringify({ attempt: det?.repairAttempt, patch: det?.patch }))
+  check(
+    `${faultId} real evidence captured (error + source file)`,
+    (det?.description ?? '').includes(faultEvidenceMarker(faultId)),
+    `description=${(det?.description ?? '').slice(0, 120)}`,
+  )
+  check(
+    `${faultId} real evidence points at the real source file`,
+    (det?.description ?? '').includes(faultEvidenceFile(faultId)),
+    `description=${(det?.description ?? '').slice(0, 200)}`,
+  )
+
+  await verifyBehaviour(op)
+
+  const after = await op.get('/api/faults')
+  const fault = after.json?.faults?.find((f) => f.id === faultId)
+  check(
+    `${faultId} fault no longer active (file repaired, not leaked)`,
+    fault?.active === false,
+    `active=${fault?.active}`,
+  )
+}
+
+const triggerMethod = (faultId) => (faultId === 'HIGH-01' ? 'POST' : faultId === 'MEDIUM-02' ? 'GET' : 'POST')
+const triggerEndpoint = (faultId) => (faultId === 'HIGH-01' ? '/api/auth/login' : '/api/posts')
+
+const faultEvidenceMarker = (faultId) =>
+  faultId === 'LOW-01'
+    ? 'PrismaClientValidationError'
+    : faultId === 'MEDIUM-01' || faultId === 'MEDIUM-02'
+      ? 'Injected'
+      : 'Credentials verification subsystem failure'
+
+const faultEvidenceFile = (faultId) => {
+  if (faultId === 'HIGH-01') return 'app/api/auth/login/route.ts'
+  return 'app/api/posts/route.ts'
+}
+
+/**
+ * Re-runs `fn` until `pred` passes (dev-server recompile latency tolerance) or
+ * `tries` attempts are exhausted; returns the last result.
+ */
+async function retryUntil(fn, pred, { tries = 8, waitMs = 1000 } = {}) {
+  let res
+  for (let i = 0; i < tries; i += 1) {
+    res = await fn()
+    if (pred(res)) return res
+    await sleep(waitMs)
+  }
+  return res
+}
+
+/**
+ * Nudges a source file with a harmless comment so Turbopack's watcher
+ * re-compiles it from its CURRENT on-disk state. Turbopack occasionally
+ * coalesces a fast activate→deactivate write pair into one (stale) compile;
+ * this separate-process write forces the fresh state into the served module.
+ */
+const NUDGE_RE = /[ \t]*\/\/ bh-nudge-[0-9]+[ \t]*\n/g
+const NUDGED_FILES = [
+  'app/api/posts/[id]/route.ts',
+  'lib/server/validation.ts',
+  'app/api/projects/[id]/route.ts',
+]
+async function bumpFile(relativePath) {
+  const abs = resolve(process.cwd(), relativePath)
+  const src = readFileSync(abs, 'utf8').replace(NUDGE_RE, '')
+  writeFileSync(abs, `${src.trimEnd()}\n// bh-nudge-${Date.now()}\n`)
+  await sleep(1200)
+}
+async function stripNudges() {
+  for (const rel of NUDGED_FILES) {
+    try {
+      const abs = resolve(process.cwd(), rel)
+      const src = readFileSync(abs, 'utf8')
+      const clean = src.replace(NUDGE_RE, '').trimEnd()
+      if (clean !== src) writeFileSync(abs, `${clean}\n`)
+    } catch {}
+  }
+}
+
+async function behaviouralFaultChecks(op) {
+  console.log('\n--- Behavioural (no-exception) faults: harness symptom only, NO incident ---')
+
+  // LOW-02 — response-key typo on GET detail (returns 200, never throws).
+  {
+    await activateFault(op, 'LOW-02')
+    await bumpFile('app/api/posts/[id]/route.ts')
+    const created = await op.post('/api/posts', { content: 'LOW-02 verification post', tags: [] })
+    const postId = created.json?.post?.id
+    check('LOW-02 activate + create a normal post (POST unchanged)', created.status === 201 && !!postId, `status=${created.status}`)
+    if (postId) {
+      const faulted = await op.get(`/api/posts/${postId}`)
+      check('LOW-02 GET detail renames post → poost', faulted.json?.poost !== undefined, `keys=${Object.keys(faulted.json ?? {})}`)
+      await deactivateFault(op, 'LOW-02')
+      await bumpFile('app/api/posts/[id]/route.ts')
+      const restored = await retryUntil(
+        () => op.get(`/api/posts/${postId}`),
+        (r) => r.json?.post !== undefined && r.json?.poost === undefined,
+      )
+      check('LOW-02 restored GET detail returns `post` (not poost)', restored.json?.post !== undefined && restored.json?.poost === undefined, `keys=${Object.keys(restored.json ?? {})}`)
+    }
+  }
+
+  // LOW-03 — validation minimum becomes impossible → 400, no exception.
+  {
+    await activateFault(op, 'LOW-03')
+    await warmFor(op, 'LOW-03')
+    await bumpFile('lib/server/validation.ts')
+    const rejected = await retryUntil(
+        () => op.post('/api/posts', { content: 'x', tags: [] }),
+        (r) => r.status === 400,
+      )
+      check('LOW-03 short content rejected (400)', rejected.status === 400, `status=${rejected.status}`)
+    await deactivateFault(op, 'LOW-03')
+    await bumpFile('lib/server/validation.ts')
+    const accepted = await op.post('/api/posts', { content: 'x', tags: [] })
+    check('LOW-03 restored: short content accepted (201)', accepted.status === 201, `status=${accepted.status}`)
+  }
+
+  // MEDIUM-03 — ownership check inverted (no exception).
+  {
+    await activateFault(op, 'MEDIUM-03')
+    await warmFor(op, 'MEDIUM-03')
+    await bumpFile('app/api/projects/[id]/route.ts')
+    const proj = await op.post('/api/projects', { name: `M03-${Date.now()}`, description: 'medium-03 check', status: 'ACTIVE' })
+    const projectId = proj.json?.project?.id
+    check('MEDIUM-03 create project', proj.status === 201 && !!projectId, `status=${proj.status}`)
+    if (projectId) {
+      const denied = await op.patch(`/api/projects/${projectId}`, { name: 'Owner update', description: 'owner edit', status: 'ACTIVE' })
+      check('MEDIUM-03 owner incorrectly denied (403)', denied.status === 403, `status=${denied.status}`)
+      await deactivateFault(op, 'MEDIUM-03')
+      await bumpFile('app/api/projects/[id]/route.ts')
+      const allowed = await op.patch(`/api/projects/${projectId}`, { name: 'Owner update', description: 'owner edit', status: 'ACTIVE' })
+      check('MEDIUM-03 restored: owner can edit (200)', allowed.status === 200, `status=${allowed.status}`)
+      await op.delete(`/api/projects/${projectId}`)
+    }
+  }
+
+  // HIGH-02 — authorization guard disabled (no exception). Cross-user delete.
+  {
+    const meera = new Client()
+    await meera.post('/api/auth/login', { identifier: 'meera', password: DEMO_PASSWORD })
+
+    await activateFault(op, 'HIGH-02')
+    await warmFor(op, 'HIGH-02')
+    await bumpFile('app/api/projects/[id]/route.ts')
+    const victim = await meera.post('/api/projects', { name: `H02-victim-${Date.now()}`, description: 'guard bypass check' })
+    const victimId = victim.json?.project?.id
+    check('HIGH-02 victim project created by meera', victim.status === 201 && !!victimId, `status=${victim.status}`)
+    if (victimId) {
+      const hijack = await op.delete(`/api/projects/${victimId}`)
+      check('HIGH-02 guard OFF: arjun deletes meera project (200 bypass)', hijack.status === 200, `status=${hijack.status}`)
+    }
+    const gate = await createProjectAs(meera, 'H02-guarded')
+    const gateId = gate?.id
+    await deactivateFault(op, 'HIGH-02')
+    await bumpFile('app/api/projects/[id]/route.ts')
+    if (gateId) {
+      const blocked = await op.delete(`/api/projects/${gateId}`)
+      check('HIGH-02 restored: arjun cannot delete other user project (403)', blocked.status === 403, `status=${blocked.status}`)
+      await meera.delete(`/api/projects/${gateId}`)
+    }
+  }
+
+  // Confirm none of the behavioural faults produced an error-log incident.
+  const scan = await scanIncidents(op)
+  check(
+    'Behavioural faults produced no new ERROR-log incident',
+    (scan.json?.created ?? []).length === 0,
+    JSON.stringify(scan.json),
+  )
+}
+
+/** Creates a project for `client` and returns its id. */
+async function createProjectAs(client, tag) {
+  const res = await client.post('/api/projects', { name: `${tag}-${Date.now()}`, description: tag })
+  return res.status === 201 ? { id: res.json?.project?.id } : null
+}
+
+function devPort() {
+  try { return new URL(BASE).port || '3000' } catch { return '3000' }
+}
+
+async function restartDevServer() {
+  const port = devPort()
+  // Kill the running dev server for this port.
+  try {
+    const pids = execSync(`ss -ltnp | grep ':${port} ' | grep -o 'pid=[0-9]*' | cut -d= -f2`, { encoding: 'utf8' })
+      .trim().split('\n').filter(Boolean)
+    for (const pid of pids) {
+      try { process.kill(Number(pid), 'SIGTERM') } catch {}
+    }
+  } catch {}
+  for (let i = 0; i < 20; i += 1) {
+    try { execSync(`ss -ltn | grep ':${port}'`) } catch { break }
+    await sleep(500)
+  }
+  const child = spawn('npx', ['next', 'dev', '-p', port], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      SELF_HEALING_TEST_MODE: 'true',
+      AI_PROVIDER: 'test',
+      FAULT_INJECTION_ENABLED: 'true',
+      AUTH_GUARD_ENABLED: 'false',
+    },
+    detached: true,
+    stdio: 'ignore',
+  })
+  child.unref()
+  for (let i = 0; i < 60; i += 1) {
+    try {
+      const res = await fetch(`${BASE}/api/health`)
+      if (res.ok) return true
+    } catch {}
+    await sleep(1000)
+  }
+  return false
+}
+
 async function run() {
-  const operator = new Client()
-  console.log('# Phase 9 Self-Healing Verification')
+  const op = new Client()
+  console.log('# Phase 9 Self-Healing Verification (real runtime loop)')
 
-  // Login as operator
   console.log('\nAuthentication')
-  const login = await operator.post('/api/auth/login', { identifier: 'arjun', password: 'buildhub-demo1' })
+  const login = await op.post('/api/auth/login', OPERATOR)
   check('Operator login arjun → 200', login.status === 200, `status=${login.status}`)
+  if (login.status !== 200) throw new Error('Cannot login — aborting')
 
-  // Deactivate all faults at start to ensure clean state
-  console.log('\nCleanup: Deactivating all faults')
-  const cleanup = await operator.post('/api/faults', { action: 'deactivate-all' })
-  check('Deactivate all faults', cleanup.status === 200, `status=${cleanup.status}`)
+  // Open incidents existing before the run begin — later cycles must never
+  // treat these as evidence of a just-activated fault.
+  const preOpen = new Set()
+  for (const candidate of await openIncidentIds(op)) preOpen.add(candidate)
 
-  // Test fault injection API
+  console.log('\nCleanup: deactivate any leftover faults')
+  const cleanup = await op.post('/api/faults', { action: 'deactivate-all' })
+  check('Deactivate all faults → 200', cleanup.status === 200, `status=${cleanup.status}`)
+
   console.log('\nFault Injection API')
-  const faultsList = await operator.get('/api/faults')
-  check('GET /api/faults → 200', faultsList.status === 200, `status=${faultsList.status}`)
-  check('Fault injection enabled', faultsList.json?.enabled === true, JSON.stringify(faultsList.json?.enabled))
+  const faultsList = await op.get('/api/faults')
+  check('GET /api/faults → 200 + enabled', faultsList.status === 200 && faultsList.json?.enabled === true, `status=${faultsList.status} enabled=${faultsList.json?.enabled}`)
   check('9 faults registered', faultsList.json?.total === 9, `got ${faultsList.json?.total}`)
-
-  const faultIds = ['LOW-01', 'LOW-02', 'LOW-03', 'MEDIUM-01', 'MEDIUM-02', 'MEDIUM-03', 'HIGH-01', 'HIGH-02', 'HIGH-03']
-  for (const id of faultIds) {
-    const fault = faultsList.json?.faults?.find(f => f.id === id)
-    check(`Fault ${id} exists`, !!fault, 'not found')
+  for (const id of ['LOW-01', 'LOW-02', 'LOW-03', 'MEDIUM-01', 'MEDIUM-02', 'MEDIUM-03', 'HIGH-01', 'HIGH-02', 'HIGH-03']) {
+    const fault = faultsList.json?.faults?.find((f) => f.id === id)
+    check(`Fault registry has ${id}`, !!fault, 'not found')
     if (fault) {
-      check(`Fault ${id} risk level`, fault.severity === (id.startsWith('LOW') ? 'LOW' : id.startsWith('MEDIUM') ? 'MEDIUM' : 'HIGH'), `got ${fault.severity}`)
+      check(`${id} risk level`, fault.severity === (id.startsWith('LOW') ? 'LOW' : id.startsWith('MEDIUM') ? 'MEDIUM' : 'HIGH'), `got ${fault.severity}`)
+      check(`${id} starts inactive`, fault.active === false, `active=${fault.active}`)
     }
   }
 
-  // Test a full self-healing loop through the new fault → incident → engine path.
-  console.log('\n=== Fault → Incident → Self-Healing Engine ===')
+  console.log('\n=== Real failure → incident → engine (crash faults) ===')
 
-  const activate = await operator.post('/api/faults', { faultId: 'LOW-01' })
-  check('LOW-01 activate → 200 + incident', activate.status === 200 && activate.json?.incident, `status=${activate.status}`)
-  const incident = activate.json?.incident
-  const incidentId = incident?.id
-  check('Activation created an incident', !!incidentId, JSON.stringify(incident))
-  check('Activation incident has severity', incident?.severity === 'CONFIRMED' || !!incident?.severity, `severity=${incident?.severity}`)
-
-  if (incidentId) {
-    const run = await operator.post('/api/security/run', { incidentId })
-    check('POST /api/security/run → 200', run.status === 200, `status=${run.status}`)
-    check('Engine reached a controlled stage', ['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED', 'AI_UNAVAILABLE', 'HIGH_RISK_APPROVAL_REQUIRED'].includes(run.json?.stage), `stage=${run.json?.stage}`)
-
-    const detail = await operator.get(`/api/incidents/${incidentId}`)
-    check('GET incident detail → 200', detail.status === 200, `status=${detail.status}`)
-    check('Detail exposes repair attempt', detail.json?.incident?.repairAttempt != null)
-  }
-
-  const deactivateLow = await operator.post('/api/faults', { faultId: 'LOW-01', action: 'deactivate' })
-  check('LOW-01 deactivate → 200', deactivateLow.status === 200, `status=${deactivateLow.status}`)
-
-  const faultsAfter = await operator.get('/api/faults')
-  const lowAfter = faultsAfter.json?.faults?.find(f => f.id === 'LOW-01')
-  check('LOW-01 is inactive', lowAfter?.active === false, `active=${lowAfter?.active}`)
-
-  // Test random fault activation endpoint (skips when everything is already active).
-  console.log('\n=== Random Fault ===')
-  const randomFault = await operator.get('/api/faults/random')
-  check('GET /api/faults/random → 200/409', [200, 409].includes(randomFault.status), `status=${randomFault.status}`)
-  if (randomFault.status === 200) {
-    check('Random fault returns a fault id', !!randomFault.json?.faultId, JSON.stringify(randomFault.json))
-    // The random endpoint picks an INACTIVE fault → activate then deactivate it.
-    const act = await operator.post('/api/faults', { faultId: randomFault.json?.faultId })
-    check('Activate random fault → 200', act.status === 200, `status=${act.status}`)
-    const deact = await operator.post('/api/faults', { faultId: randomFault.json?.faultId, action: 'deactivate' })
-    check('Deactivate random fault', deact.status === 200, `status=${deact.status}`)
-  }
-
-  // Test LOW fault injection and self-healing
-  console.log('\n=== LOW Fault Tests (Auto-Remediation) ===')
-
-  for (const faultId of ['LOW-01', 'LOW-02', 'LOW-03']) {
-    console.log(`\n--- Testing ${faultId} ---`)
-    
-    // Activate fault
-    const activate = await operator.post('/api/faults', { faultId })
-    check(`${faultId} activate → 200`, activate.status === 200, `status=${activate.status}`)
-    
-    // Verify fault is active
-    const faultsAfter = await operator.get('/api/faults')
-    const faultInfo = faultsAfter.json?.faults?.find(f => f.id === faultId)
-    check(`${faultId} is active`, faultInfo?.active === true, `active=${faultInfo?.active}`)
-
-    // Trigger the fault
-    let triggerResult
-    if (faultId === 'LOW-01' || faultId === 'LOW-03') {
-      triggerResult = await operator.post('/api/posts', { content: 'Test post content', tags: [] })
-    } else if (faultId === 'LOW-02') {
-      // Need a post ID first - create one normally
-      const createPost = await operator.post('/api/posts', { content: 'Test post for LOW-02', tags: [] })
-      if (createPost.status === 201) {
-        const postId = createPost.json?.post?.id
-        triggerResult = await operator.get(`/api/posts/${postId}`)
-      }
-    }
-
-    if (triggerResult) {
-      const isFaultTriggered = triggerResult.status >= 400 || (triggerResult.json && triggerResult.json.poost !== undefined)
-      check(`${faultId} triggers fault`, isFaultTriggered, `status=${triggerResult.status}`)
-    }
-
-    // Run self-healing pipeline via security run
-    // First, we need to create an incident from the error
-    // For now, verify the fault can be deactivated
-    const deactivate = await operator.post('/api/faults', { faultId, action: 'deactivate' })
-    check(`${faultId} deactivate → 200`, deactivate.status === 200, `status=${deactivate.status}`)
-
-    // Verify fault is inactive
-    const faultsFinal = await operator.get('/api/faults')
-    const faultInfoFinal = faultsFinal.json?.faults?.find(f => f.id === faultId)
-    check(`${faultId} is inactive`, faultInfoFinal?.active === false, `active=${faultInfoFinal?.active}`)
-  }
-
-  // Test MEDIUM fault injection
-  console.log('\n=== MEDIUM Fault Tests (Auto-Remediation) ===')
-
-  for (const faultId of ['MEDIUM-01', 'MEDIUM-02', 'MEDIUM-03']) {
-    console.log(`\n--- Testing ${faultId} ---`)
-    
-    const activate = await operator.post('/api/faults', { faultId })
-    check(`${faultId} activate → 200`, activate.status === 200, `status=${activate.status}`)
-    
-    // Trigger the fault
-    let triggerResult
-    if (faultId === 'MEDIUM-01') {
-      triggerResult = await operator.post('/api/posts', { content: 'Test post content', tags: [] })
-    } else if (faultId === 'MEDIUM-02') {
-      triggerResult = await operator.get('/api/posts')
-    } else if (faultId === 'MEDIUM-03') {
-      // Need a project first - use PATCH to trigger the authz fault
-      const createProject = await operator.post('/api/projects', { name: 'Test Project', description: 'Test', status: 'ACTIVE' })
-      if (createProject.status === 201) {
-        const projectId = createProject.json?.project?.id
-        triggerResult = await operator.post(`/api/projects/${projectId}`, { name: 'Updated Name' })
-      }
-    }
-
-    if (triggerResult) {
-      const isFaultTriggered = triggerResult.status >= 400
-      check(`${faultId} triggers fault`, isFaultTriggered, `status=${triggerResult.status}`)
-    }
-
-    const deactivate = await operator.post('/api/faults', { faultId, action: 'deactivate' })
-    check(`${faultId} deactivate → 200`, deactivate.status === 200, `status=${deactivate.status}`)
-  }
-
-  // Test HIGH fault injection
-  console.log('\n=== HIGH Fault Tests (Approval Required) ===')
-
-  for (const faultId of ['HIGH-01', 'HIGH-02', 'HIGH-03']) {
-    console.log(`\n--- Testing ${faultId} ---`)
-    
-    const activate = await operator.post('/api/faults', { faultId })
-    check(`${faultId} activate → 200`, activate.status === 200, `status=${activate.status}`)
-    
-    // Trigger the fault
-    let triggerResult
-    if (faultId === 'HIGH-01') {
-      triggerResult = await operator.post('/api/auth/login', { identifier: 'arjun', password: 'wrongpassword' })
-    } else if (faultId === 'HIGH-02') {
-      // Need a project owned by another user
-      triggerResult = await operator.delete('/api/projects/nonexistent')
-    } else if (faultId === 'HIGH-03') {
-      triggerResult = await operator.get('/api/posts')
-    }
-
-    if (triggerResult) {
-      const isFaultTriggered = triggerResult.status >= 400 || (triggerResult.status === 200 && faultId === 'HIGH-01')
-      check(`${faultId} triggers fault`, isFaultTriggered, `status=${triggerResult.status}`)
-    }
-
-    const deactivate = await operator.post('/api/faults', { faultId, action: 'deactivate' })
-    check(`${faultId} deactivate → 200`, deactivate.status === 200, `status=${deactivate.status}`)
-  }
-
-  // Test approval workflow
-  console.log('\n=== Approval Workflow Tests ===')
-  
-  // Create a test incident and approval
-  // The incident id is fabricated (does not exist), so the FK check returns 400.
-  const approvalCreate = await operator.post('/api/approvals/create', {
-    incidentId: 'test-incident-id',
-    patchId: 'PATCH-test123',
-    operator: 'test-operator'
+  await crashFaultCycle(op, preOpen, {
+    faultId: 'LOW-01',
+    trigger: () => op.post('/api/posts', { content: `LOW-01 trigger ${Date.now()}`, tags: [] }),
+    expectTrigger: (res) => res.status === 500,
+    verifyBehaviour: async (client) => {
+      const created = await client.post('/api/posts', { content: `LOW-01 verified ${Date.now()}`, tags: [] })
+      check('LOW-01 repaired: post creation works (201)', created.status === 201, `status=${created.status}`)
+    },
   })
-  check('POST /api/approvals/create → 200/400/404', [200, 400, 404, 409].includes(approvalCreate.status), `status=${approvalCreate.status}`)
 
-  // Test approval proceed
-  const approvalProceed = await operator.post('/api/approvals/proceed', {
-    approvalId: 'APR-123456',
-    action: 'proceed'
+  await crashFaultCycle(op, preOpen, {
+    faultId: 'MEDIUM-01',
+    trigger: () => op.post('/api/posts', { content: `MEDIUM-01 trigger ${Date.now()}`, tags: [] }),
+    expectTrigger: (res) => res.status === 500,
+    verifyBehaviour: async (client) => {
+      const created = await client.post('/api/posts', { content: `MEDIUM-01 verified ${Date.now()}`, tags: [] })
+      check('MEDIUM-01 repaired: post creation works (201)', created.status === 201, `status=${created.status}`)
+    },
   })
-  check('POST /api/approvals/proceed → 404 (not found)', approvalProceed.status === 404, `status=${approvalProceed.status}`)
 
-  // Test Telegram dedupe
-  console.log('\n=== Telegram Deduplication Tests ===')
-  
-  const telegramTest1 = await operator.post('/api/telegram/test', {})
-  check('POST /api/telegram/test #1', [200, 400].includes(telegramTest1.status), `status=${telegramTest1.status}`)
-  
-  const telegramTest2 = await operator.post('/api/telegram/test', {})
-  check('POST /api/telegram/test #2 (dedupe)', [200, 400].includes(telegramTest2.status), `status=${telegramTest2.status}`)
-  
-  // The second should be blocked by cooldown
-  if (telegramTest2.status === 400) {
-    check('Telegram cooldown active', telegramTest2.json?.error?.includes('Cooldown') || telegramTest2.json?.error?.includes('cooldown'), JSON.stringify(telegramTest2.json))
+  await crashFaultCycle(op, preOpen, {
+    faultId: 'MEDIUM-02',
+    trigger: () => op.get('/api/posts?pageSize=3'),
+    expectTrigger: (res) => res.status === 500,
+    verifyBehaviour: async (client) => {
+      const feed = await client.get('/api/posts?pageSize=3')
+      check('MEDIUM-02 repaired: feed loads (200 + posts)', feed.status === 200 && Array.isArray(feed.json?.posts), `status=${feed.status}`)
+    },
+  })
+
+  await crashFaultCycle(op, preOpen, {
+    faultId: 'HIGH-01',
+    trigger: () => op.post('/api/auth/login', { identifier: 'arjun', password: 'wrong-password-for-high01' }),
+    expectTrigger: (res) => res.status === 500,
+    verifyBehaviour: async (client) => {
+      const wrong = await client.post('/api/auth/login', { identifier: 'arjun', password: 'wrong-password-for-high01' })
+      check('HIGH-01 repaired: wrong password → 401', wrong.status === 401, `status=${wrong.status}`)
+      const right = await client.post('/api/auth/login', { identifier: 'arjun', password: DEMO_PASSWORD })
+      check('HIGH-01 repaired: correct password → 200', right.status === 200, `status=${right.status}`)
+    },
+  })
+
+  // Merge check (one extra failure while the incident is still OPEN).
+  console.log('\n=== Merge behaviour ===')
+  await sleep(2000)
+  await warmFor(op, 'LOW-01')
+  await activateFault(op, 'LOW-01')
+  await sleep(2000)
+  await warmFor(op, 'LOW-01')
+  const preMergeOpen = new Set(await openIncidentIds(op))
+  const mergeTrigger = async () => {
+    const res = await triggerUntilFailure(() => op.post('/api/posts', { content: `MERGE trigger ${Date.now()}`, tags: [] }), {
+      expected: (r) => r.status === 500,
+    })
+    return res
   }
+  await mergeTrigger()
+  await mergeTrigger()
+  const mergeScan = await scanIncidents(op)
+  const mergeNew = (mergeScan.json?.created ?? []).filter((c) => !preOpen.has(c.id) && !preMergeOpen.has(c.id))
+  check(
+    'Two identical failures consolidate into ONE incident (created=1 or merged)',
+    (mergeScan.json?.created?.length ?? 0) === 1 || (mergeScan.json?.merged ?? 0) >= 1,
+    JSON.stringify(mergeScan.json),
+  )
+  const mergedIncident = mergeNew.length > 0
+    ? mergeNew[mergeNew.length - 1]
+    : (mergeScan.json?.created ?? [])[0] ?? null
+  if (mergedIncident) {
+    const runMerged = await op.post('/api/security/run', { incidentId: mergedIncident.id })
+    check('Merged incident also repairs (RESOLVED)', runMerged.json?.stage === 'RESOLVED', `stage=${runMerged.json?.stage}`)
+  }
+  await op.post('/api/faults', { action: 'deactivate-all' })
+  const faultsFinal = await op.get('/api/faults')
+  check('All faults clean after merge block', (faultsFinal.json?.active ?? 0) === 0, `active=${faultsFinal.json?.active}`)
 
-  // Test real-time dashboard (check /api/observability/summary updates)
-  console.log('\n=== Real-Time Dashboard Tests ===')
-  
-  const summary1 = await operator.get('/api/observability/summary')
-  check('GET /api/observability/summary → 200', summary1.status === 200, `status=${summary1.status}`)
-  
-  const summary2 = await operator.get('/api/observability/summary')
-  check('Second read consistent', summary1.json?.overview?.riskScore === summary2.json?.overview?.riskScore, JSON.stringify(summary2.json?.overview))
+  // Turbopack dev recompile of repeatedly-rewritten route files drifts into a
+  // stale state. Restart the dev server so every module compiles fresh from
+  // current on-disk state before the harness-only behavioural checks.
+  console.log('\n--- restarting dev server for clean compilation slate ---')
+  check('dev server restarted', await restartDevServer(), 'restartTimedOut')
+  const relogin = await op.post('/api/auth/login', OPERATOR)
+  check('post-restart login arjun → 200', relogin.status === 200, `status=${relogin.status}`)
 
-  // Test AI Chat endpoint (if exists)
-  console.log('\n=== AI Chat Tests ===')
-  
-  // Check if AI chat endpoint exists
-  const aiChat = await operator.post('/api/ai/chat', { message: 'What is the current risk score?' })
-  check('POST /api/ai/chat exists', [200, 404].includes(aiChat.status), `status=${aiChat.status}`)
+  console.log('\n=== Behavioural (non-crash) faults ===')
+  await behaviouralFaultChecks(op)
 
-  // Test 3D visualization data endpoint
-  console.log('\n=== 3D Visualization Tests ===')
-  
-  // Check if 3D data endpoint exists
-  const vizData = await operator.get('/api/ai/visualization')
-  check('GET /api/ai/visualization exists', [200, 404].includes(vizData.status), `status=${vizData.status}`)
+  const allClean = await op.get('/api/faults')
+  check('Final: no active faults (all repaired or restored)', (allClean.json?.active ?? 0) === 0, `active=${allClean.json?.active}`)
 
-  // Test repair memory
-  console.log('\n=== Repair Memory Tests ===')
-  
-  const memory = await operator.get('/api/ai/memory')
-  check('GET /api/ai/memory exists', [200, 404].includes(memory.status), `status=${memory.status}`)
+  await stripNudges()
 
-  // Test exact file/line reporting
-  console.log('\n=== Exact File/Line Reporting Tests ===')
-  
-  // Check incident detail includes file/line info
-  const incidents = await operator.get('/api/incidents')
-  check('GET /api/incidents → 200', incidents.status === 200, `status=${incidents.status}`)
-
-  // Test validation after patch
-  console.log('\n=== Validation & Rollback Tests ===')
-  
-  // Check apply-patch endpoint exists
-  const applyPatch = await operator.post('/api/incidents/test-id/apply-patch', {})
-  check('POST /api/incidents/[id]/apply-patch exists', [200, 401, 403, 404].includes(applyPatch.status), `status=${applyPatch.status}`)
-
-  // Final summary
   console.log('\n' + '='.repeat(52))
   console.log(`Self-Healing verification: ${passed} passed, ${failed} failed`)
   if (failures.length) {

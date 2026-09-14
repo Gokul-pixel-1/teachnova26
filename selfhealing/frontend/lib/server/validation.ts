@@ -1,20 +1,17 @@
 import 'server-only'
 
 import { z } from 'zod'
-import { isFaultInjectionEnabled, isFaultGaurded } from './fault-injection'
+import { isFaultActive } from '@/lib/server/fault-injection'
 
-// Server-only validation that includes fault injection checks
-// This is used by API routes (server-side) only
+// Server-only validation used by API routes (server-side) only.
 
 export const POST_CONTENT_MAX = 1000
 export const MAX_TAGS = 5
 
-// LOW-03 fault: incorrect validation condition (min 1001 instead of 1)
+// LOW-03 (runtime fault): while active the minimum is raised to 1001 so
+// valid content is rejected with a 400 (no exception, no source change).
 function getPostContentMin(): number {
-  if (isFaultGaurded('LOW-03')) {
-    return 1001 // Fault: impossible condition
-  }
-  return 1 // Normal
+  return isFaultActive('LOW-03') ? 1001 : 1 // Normal
 }
 
 // NOTE: the LOW-03 min is evaluated at parse time (not build time) via refine

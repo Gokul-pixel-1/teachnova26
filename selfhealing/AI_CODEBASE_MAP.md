@@ -60,14 +60,23 @@ BuildHub (Next.js 16 + TypeScript + Tailwind v4)
 │   │   └── command/            # Command Center components
 │   │
 │   ├── lib/                    # Shared libraries
+│   │   ├── ai/                 # PURE AI contracts (no server-only, unit-testable)
+│   │   │   ├── schemas.ts      # zod output contracts + extract/validate helpers
+│   │   │   └── prompts.ts      # prompt-injection boundary + agent system prompts
 │   │   ├── server/             # Server-only modules
 │   │   │   ├── db.ts           # Prisma client (with pg adapter)
 │   │   │   ├── auth.ts         # Session/auth utilities
 │   │   │   ├── logger.ts       # Structured logging
+│   │   │   ├── provider.ts     # Provider factory: local-first (ollama default) + groq
 │   │   │   ├── observability.ts # Incident/log/agent serialization
 │   │   │   ├── risk.ts         # Deterministic risk engine
 │   │   │   ├── security.ts     # Security findings + AI pipeline
-│   │   │   ├── ai.ts           # Real Groq Fixer/Critic/Judge (+ TEST hermetic)
+│   │   │   ├── ai.ts           # Phase-8 shim (single-pass Fixer/Critic/Judge; routes via getProvider())
+│   │   │   ├── ai/             # Phase 10 AI module
+│   │   │   │   ├── queue.ts            # FIFO inference queue (one inference at a time)
+│   │   │   │   ├── ollama-provider.ts  # REAL Ollama provider (local-first)
+│   │   │   │   ├── context-builder.ts  # log/stack/source/memory renderers (truncation caps)
+│   │   │   │   └── index.ts            # module re-exports
 │   │   │   ├── telegram.ts     # IPv4-forced transport, append-only delivery + dedupe (ADR-016)
 │   │   │   ├── notifications/  # Canonical incident brief + Telegram message builders
 │   │   │   │   ├── brief.ts    # buildIncidentBrief — one persisted source of truth
@@ -77,8 +86,8 @@ BuildHub (Next.js 16 + TypeScript + Tailwind v4)
 │   │   │   ├── fault-injection.ts # Fault registry + disarm/rearm guards
 │   │   │   ├── fault-injection-handlers.ts # Runtime fault behaviors (HIGH-03 outage)
 │   │   │   ├── repair/         # Phase 9 iterative repair engine
-│   │   │   │   ├── engine.ts   # runSelfHealingRepair/continueApprovedRepair/…
-│   │   │   │   ├── conversation.ts # Coder/Critic/Judge rounds
+│   │   │   │   ├── engine.ts   # runSelfHealingRepair/continueApprovedRepair/… (+ RL wiring)
+│   │   │   │   ├── conversation.ts # Analyzer→Coder/Critic/Judge rounds, strict schema parsing
 │   │   │   │   ├── evidence.ts # error sanitisation/location
 │   │   │   │   ├── canonical.ts # oracle baseline fix decision
 │   │   │   │   ├── validation.ts # candidate guardrails
@@ -87,7 +96,8 @@ BuildHub (Next.js 16 + TypeScript + Tailwind v4)
 │   │   │   │   ├── events.ts   # timeline events
 │   │   │   │   └── ingest.ts   # createFaultIncident (fault → incident)
 │   │   │   ├── learning/       # Phase 10 learning loop
-│   │   │   │   └── memory.ts   # reward policy, memory/experience, dataset/metrics
+│   │   │   │   ├── memory.ts   # reward policy, memory/experience, dataset/metrics
+│   │   │   │   └── decision.ts # RL tabular bandit (recommendAction, NON-ENFORCING)
 │   │   │   ├── report.ts       # PDF generation
 │   │   │   ├── routes-map.ts   # Route → source file hints
 │   │   │   ├── slugs.ts        # Slug generation
@@ -158,11 +168,24 @@ BuildHub (Next.js 16 + TypeScript + Tailwind v4)
 - `exportRlDataset()` — dataset JSON; visualization aggregates (per-severity win/rollback)
 - Reward policy: `REPAIR_REWARD_RESOLVED`/`ROLLED_BACK`/`NEGATIVE` env-tunable (defaults 1.0 / -0.5 / -1.0)
 
-### `ai.ts` — Real Groq Agents (hermetic TEST)
+### `ai.ts` — Phase-8 single-pass agents (shim, routes via getProvider())
 - `callAgent(agent, ctx, prior)` — single agent call (FIXER|CRITIC|JUDGE|CODER)
 - `systemPromptFor(agent)` — strict JSON contracts
 - `normalizeOutput()` — validates AI response shape
-- Provider: Groq (qwen/qwen3.8-27b), 90s timeout; `AI_PROVIDER=test` + `SELF_HEALING_TEST_MODE` + non-production returns deterministic `scenario` contracts (`accept-round-1|2|3`, `reject-all`, `judge-reject`) — scenarios are never sent to Groq
+- Provider: now resolved by `lib/server/provider.ts` (local-first Ollama default; Groq unchanged). The strict Phase 10 schemas in `lib/ai/schemas.ts` are the canonical contracts.<br>
+- Hermetic: `AI_PROVIDER=test` + `SELF_HEALING_TEST_MODE` + non-production returns deterministic `scenario` contracts (`accept-round-1|2|3`, `reject-all`, `judge-reject`) — scenarios are never sent to a real model
+
+### `provider.ts` — local-first provider factory (Phase 10)
+- `resolveProviderName()` — TEST (hermetic) > groq (explicit) > ollama (explicit) > default: groq iff `GROQ_API_KEY` set, else **ollama**
+- `getProvider()` / `resetProviderCache()` / `providerConfiguredModel()` / `providerOfferedModels()` / `providerModeLabel()`
+
+### `repair/conversation.ts` — strict parsers + prompt boundary (Phase 10/11)
+- `parseCoder/parseCritic/parseJudge/parseAnalyzer` — schema-first via `validateWith` (never partial trust)
+- Analyzer phase runs FIRST in REAL mode (AgentRun `kind=ANALYZER`, `agent=FIXER`); hypothesis passed to Coder as "VERIFY — it may be wrong"
+- Prompt injection defense via `lib/ai/prompts.ts` (`UNTRUSTED` markers + `INJECTION_GUARD`)
+
+### `learning/decision.ts` — RL decision layer (Phase 10)
+- `recommendAction()` — tabular bandit over `(type, severity, risk, confidenceBucket)`; conservative `AUTO_REPAIR` default; **recorded, never enforced** (HIGH approval/candidate/validation/rollback always win)
 
 ### `approval.ts` — Approval State Machine
 - `createApproval({incidentId, patchId, operator, repairAttemptId?})` — creates APR-XXXXX (crypto randomInt id, collision retry only on P2002)
@@ -245,7 +268,8 @@ BuildHub (Next.js 16 + TypeScript + Tailwind v4)
 | POST | `/api/approvals/create` | operator | Create approval (404 if incident unknown) |
 | POST | `/api/approvals/proceed` | operator | Approve/reject (continues bound repair on approve) |
 | POST | `/api/incidents/[id]/apply-patch` | session | Apply approved patch |
-| POST | `/api/ai/chat` | session | Real Groq operations chat (TEST short-circuit; REAL injects observed Telegram delivery facts) |
+| GET | `/api/ai/status` | session | Live AI runtime status: provider, mode, model, catalog, Ollama latency/calls/queue |
+| POST | `/api/ai/chat` | session | AI operations chat (Ollama default; REAL injects observed Telegram delivery facts) |
 | GET | `/api/ai/memory` | session | Repair memory |
 | GET | `/api/ai/learning` | session | Phase 10 learning metrics |
 | GET | `/api/ai/rl-dataset` | session | RL dataset export |
@@ -386,9 +410,20 @@ python3 scripts/e2e_phase6_full.py
 python3 scripts/e2e_phase7_full.py
 python3 scripts/e2e_phase8_full.py
 
-# Phase 9 — self-healing verified (fault → incident → engine path)
-node scripts/verify-self-healing.mjs        # 80 passed, 0 failed
-python3 scripts/e2e_phase9_full.py           # 64 passed, 0 failed
+# Phase 9 — self-healing verified (real-runtime fault → incident → engine path)
+# (requires SELF_HEALING_TEST_MODE=true AI_PROVIDER=test FAULT_INJECTION_ENABLED=true AUTH_GUARD_ENABLED=false;
+#  restart the dev server freshly for a deterministic run)
+node scripts/verify-self-healing.mjs        # 103 passed, 0 failed
+python3 scripts/e2e_real_self_healing.py    # 69 passed, 0 failed (stdlib-only HTTP E2E, --quick for crash cycles)
+python3 scripts/e2e_phase9_full.py           # browser UI E2E (requires Playwright)
+
+# Phase 11 — AI safety boundary + output contracts (pure, no network)
+node --experimental-strip-types scripts/test-ai-safety.mts   # 24 passed, 0 failed
+python3 scripts/test_security_log_analyzer.py                # 20 passed, 0 failed (rules parity)
+
+# Phase 12 — REAL local-Ollama self-healing E2E (Ollama + REAL mode; SLOW on CPU)
+python3 scripts/e2e_ollama_real_self_healing.py              # smoke: LOW-01 via Ollama (mode=REAL)
+python3 scripts/e2e_ollama_real_self_healing.py --with-approval   # + HIGH-01 approval through Ollama
 
 # Phase 10 — learning loop E2E (real LOW-01 + HIGH-01 approval flows)
 python3 scripts/e2e_phase10_learning.py      # 50 passed, 0 failed
@@ -405,9 +440,14 @@ python3 scripts/e2e_telegram_notifications.py         # MEDIUM-01 → incident �
 
 Required for self-healing:
 ```
-GROQ_API_KEY=xxx              # Groq inference (server-only)
-AI_PROVIDER=groq
-AI_MODEL=qwen/qwen3.8-27b
+# Provider — local-first: with no GROQ_API_KEY the pipeline uses Ollama
+AI_PROVIDER=ollama                # or unset; groq is used only when GROQ_API_KEY is set
+AI_MODEL=qwen2.5-coder:1.5b      # Ollama model (default)
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_TIMEOUT_MS=180000
+OLLAMA_MAX_RETRIES=2
+OLLAMA_CONTEXT_WINDOW=8192
+GROQ_API_KEY=xxx                  # optional — groq inference (server-only)
 TELEGRAM_BOT_TOKEN=xxx        # Alert bot (server-only)
 TELEGRAM_CHAT_ID=xxx          # Destination chat
 SECURITY_OPERATOR_USERNAMES=arjun,operator2
@@ -417,9 +457,14 @@ AUTH_SECRET=xxx
 FAULT_INJECTION_ENABLED=true  # Gates runtime fault behaviors
 SELF_HEALING_TEST_MODE=false  # true + AI_PROVIDER=test + non-production → hermetic scenarios
 APP_URL=http://localhost:3000 # Probe target for repair validation
-REPAIR_REWARD_RESOLVED=1.0    # Phase 10 reward policy (env-tunable)
-REPAIR_REWARD_ROLLED_BACK=-0.5
-REPAIR_REWARD_NEGATIVE=-1.0
+REPAIR_REWARD_SUCCESS=50        # Phase 10 reward policy (env-tunable)
+REPAIR_REWARD_VALIDATION_FAILURE=-50
+REPAIR_REWARD_ROLLBACK=-75
+REPAIR_REWARD_SECURITY_REGRESSION=-100
+REPAIR_REWARD_REJECTION=20
+REPAIR_REWARD_HUMAN_APPROVAL=40
+REPAIR_REWARD_HUMAN_REJECTION=2
+RL_MIN_SAMPLES=5              # bandit bucket maturity threshold
 ```
 
 ---
@@ -427,7 +472,8 @@ REPAIR_REWARD_NEGATIVE=-1.0
 ## 11. Key Conventions
 
 - **No fake data** — all incidents, AI runs, approvals, repair attempts are real DB state
-- **No fake AI** — Groq failures → `AI_UNAVAILABLE` / `AI_REPAIR_FAILED`; hermetic TEST `scenario`s are never forwarded to Groq
+- **No fake AI** — provider failures → `AI_UNAVAILABLE` / `AI_REPAIR_FAILED`; hermetic TEST `scenario`s are never forwarded to a real model; default real provider is local Ollama
+- **Local-first AI** — no cloud key needed for normal operation (`lib/server/provider.ts`)
 - **Deterministic risk** — pure function of state; fault risk from registry weights (LOW 10 / MED 25 / HIGH 60 / CRIT 90)
 - **Approval binding** — each approval maps to ONE incident + ONE patch + optional `repairAttemptId`; HIGH-risk repairs pause at `WAITING_APPROVAL` on PROCEED
 - **Universal rollback** — ALL risk levels rollback (file restore + rearm) on validation failure
@@ -453,16 +499,16 @@ REPAIR_REWARD_NEGATIVE=-1.0
 | Logging bug | `lib/server/logger.ts` |
 | Risk bug | `lib/server/risk.ts` |
 | Security bug | `lib/server/security.ts` |
-| AI bug | `lib/server/ai.ts` |
+| AI bug (contracts/providers) | `lib/ai/{prompts,schemas}.ts`, `lib/server/ai/`, `lib/server/provider.ts` |
 | Telegram bug | `lib/server/telegram.ts` |
 | Telegram message content | `lib/server/notifications/brief.ts` (single source of truth) + `lib/server/notifications/summary.ts` |
 | SSE delivery + lifecycle feed | `app/api/security/events/route.ts` (+ client helper `lib/api/security.ts`) |
 | Approval bug | `lib/server/approval.ts` |
 | Analysis pipeline bug | `lib/server/security.ts` |
 | Repair engine bug | `lib/server/repair/engine.ts`, `lib/server/repair/*` |
-| Learning loop bug | `lib/server/learning/memory.ts`, `app/api/ai/*` |
+| Learning loop bug | `lib/server/learning/memory.ts`, `lib/server/learning/decision.ts`, `app/api/ai/*` |
 | Fault registry/handlers | `lib/server/fault-injection.ts`, `lib/server/fault-injection-handlers.ts` |
 
 ---
 
-*Generated for BuildHub Phase 9 + Phase 10 — AI Self-Healing + Learning Integration*
+*Generated for BuildHub Phase 9 + Phase 10/11/12 — AI Self-Healing, Learning, Local-AI (Ollama) + Security Integration*

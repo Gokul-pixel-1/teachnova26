@@ -418,7 +418,7 @@ export function OverviewClient() {
       )}
 
       {/* Score cards */}
-      <section aria-label="System scores" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section aria-label="System scores" className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <Card className="flex items-center justify-between gap-3 p-4">
           <div className="min-w-0">
             <p className="text-xs font-medium uppercase tracking-wider text-bh-faint">
@@ -436,11 +436,25 @@ export function OverviewClient() {
           icon="shield"
         />
         <StatCard
+          label="App Reliability"
+          value={overview?.applicationReliabilityScore ?? 0}
+          sub="/ 100 · endpoint failure load"
+          accent={(overview?.applicationReliabilityScore ?? 0) >= 80 ? 'var(--bh-success)' : 'var(--bh-warning)'}
+          icon="activity"
+        />
+        <StatCard
           label="System Health"
           value={`${overview?.systemHealth ?? 0}%`}
           sub="weighted component availability"
           accent={(overview?.systemHealth ?? 0) >= 95 ? 'var(--bh-success)' : 'var(--bh-warning)'}
           icon="activity"
+        />
+        <StatCard
+          label="Total Health"
+          value={overview?.totalHealthScore ?? 0}
+          sub="/ 100 · cyber + reliability + health"
+          accent={(overview?.totalHealthScore ?? 0) >= 90 ? 'var(--bh-success)' : 'var(--bh-warning)'}
+          icon="shield"
         />
         <StatCard
           label="Active Incidents"

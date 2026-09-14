@@ -6,9 +6,8 @@ import {
   safeUser,
   verifyPassword,
 } from '@/lib/server/auth'
-import { errorResponse, firstZodIssue } from '@/lib/server/response'
+import { errorResponse, firstZodIssue, handleRouteError } from '@/lib/server/response'
 import { logger, resolveRequestId } from '@/lib/server/logger'
-import { withFaultInjection, applyHigh01AuthBypass } from '@/lib/server/fault-injection-handlers'
 import {
   sourceIpFor,
   isSourceBlocked,
@@ -16,44 +15,45 @@ import {
   recordBlockedRequest,
   isAuthGuardEnabled,
 } from '@/lib/server/auth-guard'
+import { isFaultActive } from '@/lib/server/fault-injection'
 
 const GENERIC_ERROR = 'Unable to sign in. Please check your credentials and try again.'
 const BLOCKED_MESSAGE = 'Too many failed sign-in attempts. This source is temporarily blocked.'
 
 export async function POST(request: Request) {
-  return withFaultInjection('HIGH-01', async () => {
-    const requestId = resolveRequestId(request)
-    const sourceIp = sourceIpFor(request)
+  const requestId = resolveRequestId(request)
+  const sourceIp = sourceIpFor(request)
 
-    if (isAuthGuardEnabled() && isSourceBlocked(sourceIp)) {
-      recordBlockedRequest(sourceIp)
-      await logger.warn({
-        service: 'security',
-        message: `Blocked source ${sourceIp} rejected at sign-in (temporary source-IP mitigation active)`,
-        route: '/api/auth/login',
-        method: 'POST',
-        status: 429,
-        requestId,
-        errorCode: 'IP_BLOCKED',
-      })
-      return errorResponse(BLOCKED_MESSAGE, 429)
-    }
+  if (isAuthGuardEnabled() && isSourceBlocked(sourceIp)) {
+    recordBlockedRequest(sourceIp)
+    await logger.warn({
+      service: 'security',
+      message: `Blocked source ${sourceIp} rejected at sign-in (temporary source-IP mitigation active)`,
+      route: '/api/auth/login',
+      method: 'POST',
+      status: 429,
+      requestId,
+      errorCode: 'IP_BLOCKED',
+    })
+    return errorResponse(BLOCKED_MESSAGE, 429)
+  }
 
-    let body: unknown
-    try {
-      body = await request.json()
-    } catch {
-      return errorResponse('Invalid request body.', 400)
-    }
+  let body: unknown
+  try {
+    body = await request.json()
+  } catch {
+    return errorResponse('Invalid request body.', 400)
+  }
 
-    const parsed = signInSchema.safeParse(body)
-    if (!parsed.success) {
-      return errorResponse(firstZodIssue(parsed.error), 400)
-    }
+  const parsed = signInSchema.safeParse(body)
+  if (!parsed.success) {
+    return errorResponse(firstZodIssue(parsed.error), 400)
+  }
 
-    const { identifier, password } = parsed.data
-    const identifierLower = identifier.trim().toLowerCase()
+  const { identifier, password } = parsed.data
+  const identifierLower = identifier.trim().toLowerCase()
 
+  try {
     // A single, safe failure path for both "unknown account" and "wrong
     // password" so the response never reveals whether the identifier existed.
     const user = await prisma.user.findFirst({
@@ -62,8 +62,15 @@ export async function POST(request: Request) {
       },
     })
 
-    // HIGH-01: Auth bypass - skip password verification
     const passwordValid = user ? await verifyPassword(user.passwordHash, password) : false
+
+    // HIGH-01 (runtime fault): while active, a wrong password causes a genuine
+    // server error (500) instead of the normal 401 path. Correct credentials
+    // are unaffected.
+    if (isFaultActive('HIGH-01') && user && !passwordValid) {
+      throw new Error('Credentials verification subsystem failure')
+    }
+
     if (!user || !passwordValid) {
       await logger.warn({
         service: 'auth',
@@ -92,5 +99,12 @@ export async function POST(request: Request) {
     })
 
     return NextResponse.json({ user: safeUser(user) })
-  })
+  } catch (err) {
+    return handleRouteError(err, request, {
+      route: '/api/auth/login',
+      method: 'POST',
+      service: 'auth',
+      errorCode: 'AUTH_HANDLER',
+    })
+  }
 }

@@ -54,6 +54,9 @@ function ShellStatus({ className }: { className?: string }) {
     (summary?.overview.cyberSafetyScore ?? 100) >= 80 && !hasUnavailable
   const aiOnline = security?.model.valid === true
   const aiKnown = security !== null && security.model.valid !== null
+  const aiProvider = security?.model.provider ?? 'ai'
+  const aiProviderLabel =
+    aiProvider === 'groq' ? 'Groq' : aiProvider === 'ollama' ? 'Ollama' : aiProvider === 'test' ? 'Test' : 'AI'
   const aiText = aiOnline
     ? 'Online'
     : security === null
@@ -99,7 +102,7 @@ function ShellStatus({ className }: { className?: string }) {
         <Icon name="sparkles" size={14} className="text-bh-accent-ink" />
         <span className="text-bh-muted">AI </span>
         <span className={cn('font-medium', aiClass)}>
-          Groq {aiText}
+          {aiProviderLabel} {aiText}
         </span>
       </div>
       <div className="flex items-center gap-2 text-xs">
