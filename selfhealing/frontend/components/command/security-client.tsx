@@ -20,6 +20,7 @@ import type {
   SecurityTelegramDTO,
 } from '@/lib/api/security'
 import { SecurityNetwork } from './security-network'
+import { AttackTelemetryCard } from './attack-telemetry'
 import { askAiChat, type ChatResponse } from '@/lib/api/learning'
 import {
   Card,
@@ -350,6 +351,11 @@ export function SecurityClient() {
             {data.overview.activeFindings} finding{data.overview.activeFindings === 1 ? '' : 's'} open
           </p>
         </Card>
+      </div>
+
+      {/* Live attack telemetry (real guard/incident state) + NO-AI vs AI */}
+      <div className="relative">
+        <AttackTelemetryCard />
       </div>
 
       <div className="relative grid grid-cols-1 gap-4 lg:grid-cols-3">

@@ -65,10 +65,18 @@ Guard defaults (env-tunable, `frontend/lib/server/auth-guard.ts` lines 33–35):
 
 ```bash
 cd /home/dharshan/selfhealing/buildhub-no-ai
-npm run demo                                                # next dev -p 3001
+npm run build   # once (or after code changes)
+npm run demo    # next start -p 3001 (production, watcher-free)
 ```
 
-(Verified: `"demo": "next dev -p 3001"` in `buildhub-no-ai/package.json`.)
+(`"demo": "next start -p 3001"` in `buildhub-no-ai/package.json`;
+`"demo:dev": "next dev --webpack -p 3001"` keeps hot-reload for development
+when the OS file-watch budget allows. Production serving is the reliable
+hackathon path: dev watchers — Turbopack AND webpack — exhaust the host's
+`fs.inotify` budget in this environment (`OS file watch limit reached` /
+`ENOSPC`), while `next start` needs no watchers. `next.config.ts` also sets
+`turbopack.root` + `outputFileTracingRoot` to the project directory so Next.js
+no longer walks up to `/home/dharshan/package-lock.json`.)
 Uses the isolated `buildhub_no_ai` database in the same `buildhub-pg`
 container. Production-style: `npm run build && npm run start -- --port 3001`.
 
@@ -79,11 +87,18 @@ lines 36–38): `DEMO_AUTH_DEGRADE_THRESHOLD=40`,
 ## 3. How to run the attack
 
 ```bash
-# 1) Safety contract first (35 checks, never touches a server)
+# 1) Safety contract first (never touches a server)
 python3 attack-demo/test_attack_safety.py
 
 # 2) WITHOUT-AI first — it must fail (then recover, step 11)
 python3 attack-demo/run_attack.py --port 3001 --confirm-local
+
+# 2b) Named scenarios (same caps, same loopback policy, same auto-stop)
+python3 attack-demo/run_attack.py --port 3001 --scenario resource-stress --confirm-local
+python3 attack-demo/run_attack.py --port 3001 --scenario service-failure --confirm-local
+# optional structured telemetry for any scenario:
+python3 attack-demo/run_attack.py --port 3001 --scenario service-failure --confirm-local \
+  --telemetry-out /tmp/telemetry-failure-3001.json
 
 # 3) Recover the WITHOUT-AI server (operator reset — step 11)
 
@@ -291,10 +306,11 @@ The client also:
   Target, Requests, 401, 403, 429, 5xx, Peak latency, Final health, Stop
   reason.
 
-Verified by `python3 attack-demo/test_attack_safety.py` — 35 checks passed,
-0 failed (source integrity, stdlib-only imports, absence of all
-process/OS/network primitives, hard limits, loopback-only target policy,
-fail-closed CLI behaviour).
+Verified by `python3 attack-demo/test_attack_safety.py` — all checks passed
+(source integrity, stdlib-only imports, absence of all
+process/OS/network primitives, hard limits incl. bounded per-scenario pacing,
+loopback-only target policy with `--host` allowlist + `--scenario` whitelist,
+fail-closed CLI behaviour, structured telemetry with no secrets).
 
 ## Demo UI (real telemetry, no fake AI progress)
 

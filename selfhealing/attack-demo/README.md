@@ -37,16 +37,55 @@ WITH AI    :3000   NORMAL → ATTACK → DETECTED → MITIGATING → HEALTHY
 ## Quick run
 
 ```bash
-# 1) Safety first (83 checks, never touches a server)
+# 1) Safety first (never touches a server)
 python3 attack-demo/test_attack_safety.py
 
 # 2) WITHOUT-AI — the service must fail and stay down
-#    (recover afterwards with an operator reset — see ATTACK_DEMO.md §11)
+#    (recover afterwards with an operator reset/restart — see ATTACK_DEMO.md §11)
 python3 attack-demo/run_attack.py --port 3001 --confirm-local
 
 # 3) WITH-AI — detected, contained, service stays available
 python3 attack-demo/run_attack.py --port 3000 --confirm-local
 ```
+
+## Named scenarios (`run_attack.py --scenario`)
+
+All three scenarios share the same hard caps (≤300 requests, ≤60 s, ≤5
+in-flight), the same loopback-only target policy, and the same auto-stop
+conditions. The default (`request-flood`) is byte-identical to the original
+command above.
+
+```bash
+# REQUEST_FLOOD (default) — bounded forged-login burst on POST /api/auth/login
+python3 attack-demo/run_attack.py --port 3001 --confirm-local
+
+# RESOURCE_STRESS — controlled multi-endpoint load: forged logins (1:4)
+# mixed with read-only GETs on /api/posts, /api/projects, /api/health
+python3 attack-demo/run_attack.py --port 3001 --scenario resource-stress --confirm-local
+
+# SERVICE_FAILURE ("crash demo" without any OS crash) — gentle paced probe
+# (~15/s) observing the controlled app-level failure:
+# NORMAL → DEGRADED → UNAVAILABLE (:3001) or → MITIGATING (:3000)
+python3 attack-demo/run_attack.py --port 3001 --scenario service-failure --confirm-local
+```
+
+Measured 2026-09-14 against production builds (No-AI :3001):
+
+| scenario | requests | mix | elapsed | result |
+|---|---|---|---|---|
+| request-flood | 70 | 70 login | 0.6 s | 60×401 → latch → 10×503 → `unavailable` |
+| resource-stress | 240 | 60 login + 180 GET | 1.4 s | 60×401 → latch → 503s → `unavailable` |
+| service-failure | 180 | 60 login + 120 GET (paced) | 11.9 s | 60×401 → latch → 503s → `unavailable` |
+
+AI :3000 request-flood: 20 requests (10×401 → guard → 10×429), `ATTACK
+CONTAINED`, 0×5xx, real incident + REAL FIXER/CRITIC/JUDGE runs, exactly 2
+Telegram lifecycle messages (INCIDENT + ESCALATION).
+
+Add `--telemetry-out PATH` to any scenario to write structured JSON telemetry
+(scenario, target, start, duration, per-status/per-kind counts, 4xx/5xx,
+timeouts, latency avg/p95/peak, error rate, final health, verdict). The
+telemetry contains statuses + latencies only — no secrets, tokens, or cookies.
+A single-line `TELEMETRY_JSON {...}` copy is also printed to stdout.
 
 ## Hard-overload comparison (`run-overload.py`)
 
@@ -76,10 +115,12 @@ vs observed timelines, and the measured before/after results.
 ### `run_attack.py`
 
 ```
-requests  ≤ 300      (MAX_REQUESTS)
-duration  ≤  60 s    (MAX_DURATION)
-in-flight ≤   5      (MAX_CONCURRENCY)
-target    = 127.0.0.1:3000 or 127.0.0.1:3001  ONLY
+requests  ≤ 300      (MAX_REQUESTS, all scenarios)
+duration  ≤  60 s    (MAX_DURATION, all scenarios)
+in-flight ≤   5      (MAX_CONCURRENCY, all scenarios)
+pacing    ≤ 0.5 s/req (SCENARIO_PACING_S, bounded — no slow-drip abuse)
+host      = 127.0.0.1 | localhost | ::1  ONLY (--host validated, default 127.0.0.1)
+target    = <allowed-host>:3000 or <allowed-host>:3001  ONLY
 `--confirm-local` REQUIRED — the run aborts without it
 ```
 

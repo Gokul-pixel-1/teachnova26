@@ -46,7 +46,8 @@ SCRIPTS = {
         },
         "ports": (3000, 3001),
         "source": "127.0.0.1",
-        "hosts": None,
+        "hosts": ("127.0.0.1", "localhost", "::1"),
+        "scenarios": ("request-flood", "resource-stress", "service-failure"),
     },
     "run-overload.py": {
         "source_const": "SOURCE_HOST",
@@ -167,6 +168,19 @@ def main() -> int:
         check("args.port" in src, "port arrives via --port argument")
         check(str(ns.get(spec["source_const"])) in src or "127.0.0.1" in src, "source base is loopback")
         counts["passed"] += 4
+        if filename == "run_attack.py":
+            check("SCENARIOS" in ns, "SCENARIOS defined")
+            check(tuple(ns["SCENARIOS"]) == spec["scenarios"], f"SCENARIOS is exactly {spec['scenarios']}")
+            check("plan_request" in src and '"--scenario"' in src, "--scenario dispatch present")
+            check("--telemetry-out" in declared, "--telemetry-out flag present")
+            check("TELEMETRY_JSON" in src, "structured telemetry emitted")
+            for secret in ("set-cookie", "authorization"):
+                check(secret not in src.lower(), f"no secret logging primitive: {secret}")
+            check("os.kill" not in src and "import subprocess" not in src, "no process-control primitives")
+            check("SCENARIO_PACING_S" in ns, "SCENARIO_PACING_S defined")
+            check(all(v <= 0.5 for v in ns["SCENARIO_PACING_S"].values()), "pacing bounded (no slow-drip abuse)")
+            check("SCENARIO_LOGIN_EVERY" in ns, "SCENARIO_LOGIN_EVERY defined")
+            counts["passed"] += 10
         if filename == "run-overload.py":
             check("MAX_REQUESTS_CEILING" in src and "min(args.max_requests, MAX_REQUESTS_CEILING)" in src, "request cap is clamped, never exceeded")
             check("min(args.max_duration, MAX_DURATION)" in src and "min(args.concurrency, MAX_CONCURRENCY)" in src, "duration + concurrency clamped")
@@ -206,6 +220,13 @@ def main() -> int:
             code, out = run_cli("--port", "3001", "--confirm-local", "--w-posts", "-0.1")
             check(code == 2, "negative workload weight aborts (exit 2)", f"exit={code} out={out[:120]}")
             counts["passed"] += 3
+
+        if filename == "run_attack.py":
+            code, out = run_cli("--host", "evilsite.example", "--port", "3001", "--confirm-local")
+            check(code == 2, "non-loopback host aborts before any request (exit 2)", f"exit={code} out={out[:120]}")
+            code, out = run_cli("--port", "3001", "--confirm-local", "--scenario", "nuke-everything")
+            check(code == 2, "unknown scenario aborts before any request (exit 2)", f"exit={code} out={out[:120]}")
+            counts["passed"] += 2
 
         counts["passed"] += 2
 

@@ -176,6 +176,60 @@ async function postJson<T>(url: string, payload: unknown): Promise<T> {
 export const fetchSecurityStatus = () =>
   getJson<SecurityStatusDTO>('/api/security/status')
 
+// ---------------------------------------------------------------------------
+// Attack telemetry — GET /api/demo/attack (public, real guard/incident state)
+// ---------------------------------------------------------------------------
+
+export interface AttackTelemetryDTO {
+  build: string
+  port: number
+  source: string
+  guardEnabled: boolean
+  phase: 'normal' | 'attack' | 'detected' | 'mitigating' | 'recovered'
+  state: {
+    threshold: number
+    windowMs: number
+    blockMs: number
+    failCount: number
+    blocked: boolean
+    blockedUntil: string | null
+    blockedCount: number
+  }
+  health: {
+    status: string
+    availability: string
+    latencyMs: number
+    checkedAt: string
+    systemHealth: number
+    components: Array<{ name?: string; label?: string; status?: string; detail?: string }>
+  }
+  incident: {
+    ref: string
+    severity: string
+    status: string
+    riskScore: number
+    title: string
+    createdAt: string
+  } | null
+  agentRuns: Array<{
+    agent: string
+    status: string
+    progress: number | null
+    currentActivity: string | null
+    round: number
+    mode: string
+    outputSummary: string | null
+  }>
+  timestamps: {
+    firstFailureAt: string | null
+    detectedAt: string | null
+    mitigatedAt: string | null
+  }
+}
+
+export const fetchAttackTelemetry = () =>
+  getJson<AttackTelemetryDTO>('/api/demo/attack')
+
 export const runPipelineFor = (incidentId: string) =>
   postJson<AgentPipelineRunResult>('/api/security/run', { incidentId })
 
