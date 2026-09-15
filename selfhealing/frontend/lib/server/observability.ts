@@ -8,6 +8,7 @@ import type {
   AgentRun,
   Approval,
   DeliveryStatus,
+  GmailNotification,
   Incident,
   IncidentEvent,
   IncidentSeverity,
@@ -15,6 +16,7 @@ import type {
   NotificationType,
   PatchRecord,
   RepairAttempt,
+  RepairMemory,
   TelegramNotification,
 } from '@prisma/client'
 
@@ -641,13 +643,45 @@ export interface IncidentDetailDTO extends IncidentDTO {
   logs: LogEventDTO[]
   agentRuns: AgentRunDTO[]
   approvals: ApprovalDTO[]
-  previous: IncidentDTO[]
+  previous: PreviousSimilarDTO[]
   repairAttempt: RepairAttemptDTO | null
   patch: PatchRecordDTO | null
   telegram: {
     deliveries: TelegramDeliveryDTO[]
   }
+  gmail: {
+    deliveries: GmailDeliveryDTO[]
+  }
+  learning: RepairMemoryDTO | null
   terminalSummary: IncidentTerminalDTO | null
+}
+
+export interface PreviousSimilarDTO extends IncidentDTO {
+  outcome: string | null
+  reward: number | null
+  humanDecision: string | null
+}
+
+export interface GmailDeliveryDTO {
+  id: string
+  type: string
+  severity: IncidentSeverity | null
+  subject: string
+  deliveryStatus: 'QUEUED' | 'SENT' | 'FAILED' | 'SKIPPED_DUPLICATE'
+  gmailMessageId: string | null
+  error: string | null
+  createdAt: string
+}
+
+export interface RepairMemoryDTO {
+  errorSignature: string
+  outcome: string
+  reward: number
+  rewardBreakdown: Record<string, number> | null
+  recurrenceCount: number
+  humanDecision: string | null
+  risk: string | null
+  updatedAt: string
 }
 
 export function serializeIncident(
@@ -773,6 +807,32 @@ export function serializeTelegramDelivery(
   }
 }
 
+export function serializeGmailDelivery(delivery: GmailNotification): GmailDeliveryDTO {
+  return {
+    id: delivery.id,
+    type: delivery.type,
+    severity: delivery.severity,
+    subject: delivery.subject,
+    deliveryStatus: delivery.deliveryStatus,
+    gmailMessageId: delivery.gmailMessageId,
+    error: delivery.error,
+    createdAt: delivery.createdAt.toISOString(),
+  }
+}
+
+export function serializeRepairMemory(memory: RepairMemory): RepairMemoryDTO {
+  return {
+    errorSignature: memory.errorSignature,
+    outcome: memory.outcome,
+    reward: memory.reward,
+    rewardBreakdown: (memory.rewardBreakdown ?? null) as Record<string, number> | null,
+    recurrenceCount: memory.recurrenceCount,
+    humanDecision: memory.humanDecision,
+    risk: memory.risk,
+    updatedAt: memory.updatedAt.toISOString(),
+  }
+}
+
 export async function serializeLogEvent(
   event: LogEvent,
   refMap?: Map<string, string>,
@@ -848,6 +908,8 @@ export async function fetchIncidentDetail(
       repairAttempts: { orderBy: { startedAt: 'desc' }, take: 1 },
       patchRecords: { orderBy: { createdAt: 'desc' }, take: 1 },
       telegramNotifications: { orderBy: { createdAt: 'desc' } },
+      gmailNotifications: { orderBy: { createdAt: 'desc' } },
+      repairMemory: true,
     },
   })
   if (!incident) return null
@@ -864,7 +926,10 @@ export async function fetchIncidentDetail(
         },
       ],
     },
-    include: { _count: { select: { logs: true } } },
+    include: {
+      _count: { select: { logs: true } },
+      repairMemory: { select: { outcome: true, reward: true, humanDecision: true } },
+    },
     orderBy: { createdAt: 'desc' },
     take: 5,
   })
@@ -905,12 +970,21 @@ export async function fetchIncidentDetail(
     )),
     agentRuns: incident.agentRuns.map(serializeAgentRun),
     approvals: incident.approvals.map(serializeApproval),
-    previous: previousRaw.map(serializeIncident),
+    previous: previousRaw.map((prev) => ({
+      ...serializeIncident(prev),
+      outcome: prev.repairMemory?.outcome ?? null,
+      reward: prev.repairMemory?.reward ?? null,
+      humanDecision: prev.repairMemory?.humanDecision ?? null,
+    })),
     repairAttempt: incident.repairAttempts[0] ? serializeRepairAttempt(incident.repairAttempts[0]) : null,
     patch: incident.patchRecords[0] ? serializePatchRecord(incident.patchRecords[0]) : null,
     telegram: {
       deliveries: incident.telegramNotifications.map(serializeTelegramDelivery),
     },
+    gmail: {
+      deliveries: incident.gmailNotifications.map(serializeGmailDelivery),
+    },
+    learning: incident.repairMemory ? serializeRepairMemory(incident.repairMemory) : null,
     terminalSummary,
   }
 }

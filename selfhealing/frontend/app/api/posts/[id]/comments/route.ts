@@ -6,8 +6,10 @@ import {
   errorResponse,
   firstZodIssue,
   handleApiError,
+  handleRouteError,
 } from '@/lib/server/response'
 import { serializeComment } from '@/lib/server/serializers'
+import { isFaultActive } from '@/lib/server/fault-injection'
 
 export async function GET(
   _request: Request,
@@ -75,6 +77,17 @@ export async function POST(
       return errorResponse('Post not found.', 404)
     }
 
+    /*
+     * LOW-04 INTENTIONAL RUNTIME ERROR
+     *
+     * Controlled fault for the comment self-healing demonstration: while
+     * active, comment creation throws a real 500. Guarded by runtime state
+     * only — the source stays syntactically valid and healthy when inactive.
+     */
+    if (isFaultActive('LOW-04')) {
+      throw new Error('Injected comment failure')
+    }
+
     const comment = await prisma.comment.create({
       data: {
         content: parsed.data.content,
@@ -89,10 +102,13 @@ export async function POST(
       { status: 201 },
     )
   } catch (err) {
-    console.error(
-      `[api] POST /api/posts/${id}/comments failed:`,
-      err instanceof Error ? err.message : 'unknown error',
-    )
-    return handleApiError(err)
+    // Structured logging (logApiError via handleRouteError) so real comment
+    // failures are observable and can open self-healing incidents. Response
+    // behavior is unchanged (handleRouteError wraps handleApiError).
+    return handleRouteError(err, request, {
+      route: `/api/posts/${id}/comments`,
+      method: 'POST',
+      service: 'api',
+    })
   }
 }

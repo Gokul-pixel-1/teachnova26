@@ -7,6 +7,7 @@ import { logger, resolveRequestId } from '@/lib/server/logger'
 import { errorResponse, handleApiError, firstZodIssue } from '@/lib/server/response'
 import { prisma } from '@/lib/server/db'
 import { buildIncidentBrief } from '@/lib/server/notifications/brief'
+import { getRewardPolicy } from '@/lib/server/learning/memory'
 
 // POST /api/ai/chat — operator-facing Q&A with the configured model provider.
 // The operator's message is the only free input; every fact the model may use
@@ -61,8 +62,13 @@ export async function POST(request: Request) {
     // Observed alert-delivery context (safe, persisted facts — never secrets).
     const now = new Date()
     const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000)
-    const [deliveryCounts, lastIncident] = await Promise.all([
+    const [deliveryCounts, gmailCounts, lastIncident, lastHigh, memories] = await Promise.all([
       prisma.telegramNotification.groupBy({
+        by: ['deliveryStatus'],
+        where: { createdAt: { gte: dayAgo } },
+        _count: { _all: true },
+      }),
+      prisma.gmailNotification.groupBy({
         by: ['deliveryStatus'],
         where: { createdAt: { gte: dayAgo } },
         _count: { _all: true },
@@ -71,10 +77,31 @@ export async function POST(request: Request) {
         orderBy: { createdAt: 'desc' },
         select: { id: true, ref: true },
       }),
+      prisma.incident.findFirst({
+        where: { severity: 'HIGH' },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, ref: true },
+      }),
+      prisma.repairMemory.findMany({
+        orderBy: { updatedAt: 'desc' },
+        take: 5,
+        select: {
+          errorSignature: true,
+          outcome: true,
+          reward: true,
+          recurrenceCount: true,
+          humanDecision: true,
+          risk: true,
+          incident: { select: { ref: true, status: true, severity: true } },
+        },
+      }),
     ])
 
     const deliverySummary = deliveryCounts.length
       ? deliveryCounts.map((c) => `${c.deliveryStatus} ${c._count._all}`).join(', ')
+      : 'none in the last 24h'
+    const gmailSummary = gmailCounts.length
+      ? gmailCounts.map((c) => `${c.deliveryStatus} ${c._count._all}`).join(', ')
       : 'none in the last 24h'
 
     // Canonical incident brief → the exact same facts the Telegram alert used.
@@ -115,9 +142,48 @@ export async function POST(request: Request) {
       }
     }
 
+    // Last HIGH-risk incident (answers "what happened with the last HIGH incident?").
+    let highBriefText = ' No HIGH-risk incidents on record.'
+    if (lastHigh && (!lastIncident || lastHigh.id !== lastIncident.id)) {
+      const highBrief = await buildIncidentBrief(lastHigh.id)
+      if (highBrief) {
+        const judge = highBrief.aiAnalysis.judge
+        highBriefText =
+          ` Last HIGH incident ${highBrief.incident.ref}: status=${highBrief.incident.status}; ` +
+          `endpoint=${highBrief.incident.method} ${highBrief.incident.endpoint}; ` +
+          `root cause: ${highBrief.rootCause ?? 'n/a'}; proposed fix file ${highBrief.location?.file ?? 'n/a'}; ` +
+          `coder: ${(highBrief.aiAnalysis.rounds.map((r) => r.coder.diagnosis).find(Boolean) ?? 'n/a').slice(0, 200)}; ` +
+          `critic: ${(highBrief.aiAnalysis.rounds.map((r) => r.critic.verdict).find(Boolean) ?? 'n/a')}; ` +
+          `judge: ${judge ? `${judge.decision} (${judge.confidence ?? 'n/a'}%)` : 'not run'}; ` +
+          `approval: ${highBrief.approval ? `${highBrief.approval.approvalId} ${highBrief.approval.status}` : 'none'}; ` +
+          `validation: ${highBrief.validation.result}; final: ${highBrief.incident.status}.`
+      }
+    }
+
+    // Repair memory (answers "have we seen this error before?").
+    let memoryText = ' Repair memory is empty.'
+    if (memories.length > 0) {
+      const rows = memories.map(
+        (m) =>
+          `${m.incident.ref} [${m.incident.severity}/${m.outcome}, reward ${m.reward >= 0 ? '+' : ''}${m.reward}` +
+          `${m.recurrenceCount > 0 ? `, error returned ${m.recurrenceCount}× after` : ''}` +
+          `${m.humanDecision ? `, human ${m.humanDecision}` : ''}] sig=${m.errorSignature.slice(0, 60)}`,
+      )
+      memoryText = ` Recent repair experiences (${memories.length}): ${rows.join(' | ')}.`
+    }
+
+    const policy = getRewardPolicy()
+    const rewardText =
+      `RESOLVED +${policy.successfulRepair} (+${policy.humanApproval} if human-approved), ` +
+      `ROLLED_BACK ${policy.rollback}/${policy.validationFailure}, AI_REPAIR_FAILED ${policy.validationFailure}, ` +
+      `REJECTED ${policy.rejection}, same-error-returns ${policy.regression}`
+
     const context =
-      `Observed system facts (last 24h): Telegram delivery counts: ${deliverySummary}. ` +
-      `${incidentBriefText}.${deliverabilityNote}`
+      `Observed system facts (last 24h): Telegram delivery counts: ${deliverySummary}. Gmail delivery counts: ${gmailSummary}. ` +
+      `${incidentBriefText}.${deliverabilityNote}` +
+      `${highBriefText}` +
+      `${memoryText}` +
+      ` Reward policy (outcome-only): ${rewardText}.`
 
     const result = await provider.call({
       model,
@@ -125,7 +191,7 @@ export async function POST(request: Request) {
         {
           role: 'system',
           content:
-            'You are the BuildHub operations assistant. Answer operator questions about the BuildHub developer collaboration platform, its monitoring, fault-injection sandbox, self-healing repair pipeline and Telegram alerting. ' +
+            'You are the BuildHub operations assistant. Answer operator questions about the BuildHub developer collaboration platform, its monitoring, fault-injection sandbox, self-healing repair pipeline, Telegram and Gmail alerting, and repair-memory learning. ' +
             'Be concise and factual. The following OBSERVED facts are real persisted BuildHub state — you may reference them directly, but never invent state beyond them: ' +
             context,
         },

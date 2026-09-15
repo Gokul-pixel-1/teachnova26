@@ -91,16 +91,42 @@ def main():
         ids = [f["id"] for f in faults.get("faults", [])]
         check("MEDIUM-01 registered", "MEDIUM-01" in ids)
 
-        # --- Activate MEDIUM-01 → incident + INCIDENT alert ---
+        # --- Activate MEDIUM-01 → real failure → scan → incident + INCIDENT alert ---
+        # (Activation alone creates no incident by design — a real failed
+        # request must surface first; the log monitor then ingests it.)
         print("\n=== Trigger MEDIUM-01 ===")
+        pre_open = {
+            i.get("id")
+            for i in get_json(ctx, "/api/incidents?status=DETECTED,INVESTIGATING,AWAITING_REVIEW,WAITING_APPROVAL,VALIDATING&pageSize=100")[1].get("incidents", [])
+            if i.get("id")
+        }
         act = ctx.request.post(
             f"{BASE}/api/faults",
             data={"faultId": "MEDIUM-01", "action": "activate"},
         )
         check("MEDIUM-01 activate → 200", act.status == 200, f"status={act.status}")
         act_body = json.loads(act.body()) if act.body() else {}
-        incident = act_body.get("incident")
-        check("Activation created an incident", bool(incident), str(act_body))
+        incident = None
+        incident_id = None
+        trig0 = ctx.request.post(f"{BASE}/api/posts", data={"content": "TG-E2E MEDIUM-01 pre-trigger", "tags": []})
+        if trig0.status >= 400:
+            # Poll the scan (background auto-scan may win the race — accept
+            # created or newly-open incidents either way).
+            import time as _time
+            for _ in range(6):
+                s = ctx.request.post(f"{BASE}/api/incidents/scan", data={"limit": 200})
+                sb = json.loads(s.body()) if s.body() else {}
+                newbies = [c for c in sb.get("created", []) if c.get("id") and c.get("id") not in pre_open]
+                if newbies:
+                    incident = newbies[-1]
+                    break
+                _, openb = get_json(ctx, "/api/incidents?status=DETECTED,INVESTIGATING,AWAITING_REVIEW,WAITING_APPROVAL,VALIDATING&pageSize=100")
+                fresh = [i for i in openb.get("incidents", []) if i.get("id") and i.get("id") not in pre_open]
+                if fresh:
+                    incident = fresh[0]
+                    break
+                _time.sleep(2)
+        check("Activation + real failure produced an incident", bool(incident), str(act_body)[:120])
         incident_id = incident["id"] if incident else None
 
         # Fire the actual fault so the defect path executes.
@@ -132,15 +158,25 @@ def main():
             run_resp = ctx.request.post(f"{BASE}/api/security/run", data={"incidentId": incident_id})
             check("POST /api/security/run → 200", run_resp.status == 200, f"status={run_resp.status}")
 
-        # --- Repair progression: ESCALATION plan + FINAL_SUMMARY terminal ---
-        print("\n=== Repair alerts (ESCALATION + FINAL_SUMMARY) ===")
-        escalation = None
+        # --- Repair progression: MEDIUM approval-required + PROCEED + FINAL_SUMMARY ---
+        print("\n=== Repair alerts (MEDIUM_RISK_APPROVAL_REQUIRED + FINAL_SUMMARY) ===")
+        approval_msg = None
         final = None
         if incident_id:
-            escalation = poll_until(
-                lambda: delivery_of(ctx, incident_id, "ESCALATION", "SENT"), timeout=240, interval=2
+            approval_msg = poll_until(
+                lambda: delivery_of(ctx, incident_id, "MEDIUM_RISK_APPROVAL_REQUIRED", "SENT"), timeout=240, interval=2
             )
-            check("ESCALATION auto-apply plan delivered (SENT)", bool(escalation), "no SENT ESCALATION row")
+            check("MEDIUM_RISK_APPROVAL_REQUIRED delivered (SENT)", bool(approval_msg), "no SENT MEDIUM approval row")
+            # Human approves via the dashboard endpoint, then the SAME workflow
+            # applies + validates.
+            login_api(ctx)
+            run_body = json.loads(run_resp.body()) if run_resp.body() else {}
+            approval_id = run_body.get("approvalId")
+            check("Engine returned approvalId for WAITING_APPROVAL", bool(approval_id), json.dumps(run_body)[:200])
+            if approval_id:
+                proc = ctx.request.post(f"{BASE}/api/approvals/proceed", data={"approvalId": approval_id, "action": "proceed"})
+                proc_body = json.loads(proc.body()) if proc.body() else {}
+                check("PROCEED applies + validates (RESOLVED)", (proc_body.get("repair") or {}).get("stage") == "RESOLVED", json.dumps(proc_body)[:300])
             final = poll_until(
                 lambda: delivery_of(ctx, incident_id, "FINAL_SUMMARY", "SENT"),
                 timeout=600,
@@ -149,9 +185,9 @@ def main():
             check("FINAL_SUMMARY terminal delivered (SENT)", bool(final), "no SENT FINAL_SUMMARY row")
 
             all_deliveries = deliveries_of(ctx, incident_id)
-            sent_esc = [d for d in all_deliveries if d.get("type") == "ESCALATION" and d.get("deliveryStatus") == "SENT"]
+            sent_appr = [d for d in all_deliveries if d.get("type") == "MEDIUM_RISK_APPROVAL_REQUIRED" and d.get("deliveryStatus") == "SENT"]
             sent_final = [d for d in all_deliveries if d.get("type") == "FINAL_SUMMARY" and d.get("deliveryStatus") == "SENT"]
-            check("Dedupe: exactly one SENT ESCALATION", len(sent_esc) == 1, f"count={len(sent_esc)}")
+            check("Dedupe: exactly one SENT MEDIUM approval", len(sent_appr) == 1, f"count={len(sent_appr)}")
             check("Dedupe: exactly one SENT FINAL_SUMMARY", len(sent_final) == 1, f"count={len(sent_final)}")
 
             ts = terminal_body(ctx, incident_id)
@@ -209,7 +245,7 @@ def main():
                     "SENT delivery row rendered",
                     page.get_by_text(re.compile(rf"Delivered · message {re.escape(str(delivered_msg_id))}")).count() > 0,
                 )
-            for row_type in ("ESCALATION", "FINAL_SUMMARY"):
+            for row_type in ("MEDIUM_RISK_APPROVAL_REQUIRED", "FINAL_SUMMARY"):
                 check(
                     f"{row_type} delivery row rendered",
                     page.get_by_text(row_type, exact=False).count() > 0,

@@ -27,6 +27,20 @@ import 'server-only'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { resolve, dirname } from 'node:path'
 
+/**
+ * Matches a registry trigger endpoint against a concrete request route.
+ * Exact match first; `[param]` template segments (e.g. `/api/posts/[id]/…`)
+ * match any single path segment so dynamic routes map to their fault.
+ */
+export function triggerTemplateMatches(triggerEndpoint: string, route: string | null): boolean {
+  const norm = (route ?? '').split('?')[0]
+  if (triggerEndpoint === norm) return true
+  const t = triggerEndpoint.split('/')
+  const r = norm.split('/')
+  if (t.length !== r.length) return false
+  return t.every((seg, i) => seg === r[i] || /^\[.+\]$/.test(seg))
+}
+
 export interface FaultConfig {
   id: string
   name: string
@@ -78,7 +92,11 @@ export const FAULT_REGISTRY: Record<string, FaultConfig> = {
     expectedError: '500 PrismaClientValidationError: Argument `authorId` is missing',
     riskLevel: 'LOW',
     riskReason: 'Single file, single line, no security impact',
-    thrownMessage: 'LOW-01: Post creation service failure',
+    // Fragment of the REAL PrismaClientValidationError surfaced when the
+    // guard omits authorId ("Invalid `prisma.post.create()` invocation: …").
+    // Matched together with the trigger route+method in faultFor(), so the
+    // incident keeps severity LOW + faultId LOW-01.
+    thrownMessage: 'prisma.post.create',
     aiExpectedFix: 'Restore authorId: user.id (or restore normal runtime behavior)',
     validation: 'POST /api/posts → 201, post appears in feed',
     rollback: 'Deactivate runtime fault → handler returns to normal behavior',
@@ -126,6 +144,28 @@ export const FAULT_REGISTRY: Record<string, FaultConfig> = {
     rollback: 'Deactivate runtime fault → minimum restored',
     active: false,
   },
+  'LOW-04': {
+    id: 'LOW-04',
+    name: 'Broken Comment Creation (Server Error)',
+    difficulty: 'EASY',
+    wired: true,
+    runtimeBehavior:
+      'POST /api/posts/[id]/comments throws a controlled Error("Injected comment failure") while active (500).',
+    target: {
+      file: 'app/api/posts/[id]/comments/route.ts',
+      line: 78,
+      function: 'POST handler',
+    },
+    trigger: { method: 'POST', endpoint: '/api/posts/[id]/comments' },
+    expectedError: '500: Internal Server Error',
+    riskLevel: 'LOW',
+    riskReason: 'Single comment endpoint, isolated surface, no security impact',
+    thrownMessage: 'Injected comment failure',
+    aiExpectedFix: 'Restore normal runtime behavior (deactivate fault)',
+    validation: 'POST /api/posts/[id]/comments → 201, comment created',
+    rollback: 'Deactivate runtime fault → handler returns to normal behavior',
+    active: false,
+  },
   'MEDIUM-01': {
     id: 'MEDIUM-01',
     name: 'Broken Post API (Server Error)',
@@ -135,7 +175,7 @@ export const FAULT_REGISTRY: Record<string, FaultConfig> = {
       'POST /api/posts throws a controlled Error("Injected DB failure during post creation") while active (500).',
     target: {
       file: 'app/api/posts/route.ts',
-      line: 36,
+      line: 60,
       function: 'POST handler',
     },
     trigger: { method: 'POST', endpoint: '/api/posts' },
@@ -157,7 +197,7 @@ export const FAULT_REGISTRY: Record<string, FaultConfig> = {
       'GET /api/posts throws a controlled Error("Injected DB query failure") while active (500).',
     target: {
       file: 'app/api/posts/route.ts',
-      line: 106,
+      line: 138,
       function: 'GET handler',
     },
     trigger: { method: 'GET', endpoint: '/api/posts' },
@@ -397,7 +437,7 @@ export async function deactivateFaultsForEndpoint(
   const verb = (method ?? 'ANY').toUpperCase()
   await reconcileActiveFaults()
   const matching = getActiveFaults().filter(
-    (f) => f.wired && f.trigger.endpoint === norm && (f.trigger.method === 'ANY' || f.trigger.method.toUpperCase() === verb),
+    (f) => f.wired && triggerTemplateMatches(f.trigger.endpoint, norm) && (f.trigger.method === 'ANY' || f.trigger.method.toUpperCase() === verb),
   )
   const target = matching.length > 0 ? matching : getActiveFaults().filter((f) => f.wired)
   const deactivated: string[] = []

@@ -135,6 +135,19 @@ export async function runValidationProbes(incident: Incident): Promise<ProbeResu
   const method = (incident.method ?? 'GET').toUpperCase()
   const endpoint = (incident.endpoint ?? '/api/health').split('?')[0]
 
+  // Comment creation (concrete post id): throwaway post + real comment probe.
+  if (method === 'POST' && endpoint.endsWith('/comments')) {
+    const postId = await makePost(env.arjunCookie)
+    if (!postId) return [result('Comment probe setup', 'POST', '/api/posts', '201 (probe post)', 'no post created', false)]
+    const res = await request('POST', `/api/posts/${postId}/comments`, {
+      cookie: env.arjunCookie,
+      body: { content: `Validation replay comment ${Date.now()}.` },
+    })
+    const parsed = jsonOf<{ comment?: { id: string } }>(res)
+    const ok = res.status === 201 && !!parsed?.comment?.id
+    return [result('Comment creation succeeds', 'POST', `/api/posts/${postId}/comments`, '201 (comment created)', `${res.status}`, ok)]
+  }
+
   switch (`${method} ${endpoint}`) {
     case 'POST /api/posts': {
       const id = await makePost(env.arjunCookie)

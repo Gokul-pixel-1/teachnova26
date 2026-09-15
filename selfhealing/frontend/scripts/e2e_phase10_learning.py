@@ -72,6 +72,33 @@ def post(ctx, path, payload):
     return resp.status, body
 
 
+def open_ids(ctx):
+    resp = ctx.request.get(
+        f"{BASE}/api/incidents?status=DETECTED,INVESTIGATING,AWAITING_REVIEW,WAITING_APPROVAL,VALIDATING&pageSize=100"
+    )
+    body = json.loads(resp.body()) if resp.body() else {}
+    return {i.get("id") for i in body.get("incidents", []) if i.get("id")}
+
+
+def scan_for_incident(ctx, pre_open, tries=6):
+    """Poll the log-monitor scan until the real ERROR row is ingested.
+
+    Log rows persist fire-and-forget and the background auto-scan may win the
+    race (created vs merged), so accept a created incident OR any newly-open
+    incident that appeared since the trigger."""
+    import time as _time
+    for _ in range(tries):
+        resp = ctx.request.post(f"{BASE}/api/incidents/scan", data={"limit": 200})
+        body = json.loads(resp.body()) if resp.body() else {}
+        created = [c.get("id") for c in body.get("created", []) if c.get("id") and c.get("id") not in pre_open]
+        if created:
+            return created[-1]
+        for _id in sorted(open_ids(ctx) - pre_open):
+            return _id
+        _time.sleep(2)
+    return None
+
+
 def get(ctx, path):
     login(ctx)
     resp = ctx.request.get(f"{BASE}{path}")
@@ -106,11 +133,16 @@ def main():
         # ==================== FULL SELF-HEALING LOOP ====================
         print("\n=== Self-Healing Repair Loop ===")
 
-        # LOW-01: activate → incident → run engine
+        # LOW-01: activate → real failure → scan → run engine.
+        # (Activation alone creates no incident by design — a real failed
+        # request must surface first; the log monitor then ingests it.)
+        pre_low = open_ids(ctx)
         status, body = post(ctx, "/api/faults", {"faultId": "LOW-01"})
-        check("LOW-01 activate → 200 + incident", status == 200 and body.get("incident"), f"status={status}")
-        low_incident_id = (body.get("incident") or {}).get("id")
-        check("LOW-01 incident id present", bool(low_incident_id))
+        check("LOW-01 activate → 200", status == 200, f"status={status}")
+        trig = ctx.request.post(f"{BASE}/api/posts", data={"content": "Phase10-LOW01 trigger", "tags": []})
+        check("LOW-01 trigger → real failure (500)", trig.status == 500, f"status={trig.status}")
+        low_incident_id = scan_for_incident(ctx, pre_low)
+        check("LOW-01 incident ingested", bool(low_incident_id), f"id={low_incident_id}")
 
         if low_incident_id:
             status, body = post(ctx, "/api/security/run", {"incidentId": low_incident_id})
@@ -139,11 +171,17 @@ def main():
                 len((detail_inc.get("agentRuns") or [])) > 0,
             )
 
-        # HIGH-01: activate → run → approval required → approve → continue
+        # HIGH-01: activate → real failure → scan → run → approval → approve.
+        pre_high = open_ids(ctx)
         status, body = post(ctx, "/api/faults", {"faultId": "HIGH-01"})
-        check("HIGH-01 activate → 200 + incident", status == 200 and body.get("incident"), f"status={status}")
-        high_incident_id = (body.get("incident") or {}).get("id")
-        check("HIGH-01 incident id present", bool(high_incident_id))
+        check("HIGH-01 activate → 200", status == 200, f"status={status}")
+        htrig = ctx.request.post(
+            f"{BASE}/api/auth/login",
+            data={"identifier": "arjun", "password": "wrong-password-for-phase10"},
+        )
+        check("HIGH-01 trigger → real failure (500)", htrig.status == 500, f"status={htrig.status}")
+        high_incident_id = scan_for_incident(ctx, pre_high)
+        check("HIGH-01 incident ingested", bool(high_incident_id), f"id={high_incident_id}")
 
         missing_pipeline = False
         if high_incident_id:

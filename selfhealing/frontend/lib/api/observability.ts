@@ -157,12 +157,40 @@ export interface IncidentTerminalDTO {
   text: string
 }
 
+export interface GmailDeliveryDTO {
+  id: string
+  type: string
+  severity: IncidentSeverity | null
+  subject: string
+  deliveryStatus: 'QUEUED' | 'SENT' | 'FAILED' | 'SKIPPED_DUPLICATE'
+  gmailMessageId: string | null
+  error: string | null
+  createdAt: string
+}
+
+export interface PreviousSimilarDTO extends IncidentDTO {
+  outcome: string | null
+  reward: number | null
+  humanDecision: string | null
+}
+
+export interface RepairMemoryDTO {
+  errorSignature: string
+  outcome: string
+  reward: number
+  rewardBreakdown: Record<string, number> | null
+  recurrenceCount: number
+  humanDecision: string | null
+  risk: string | null
+  updatedAt: string
+}
+
 export interface IncidentDetailDTO extends IncidentDTO {
   timeline: IncidentEventDTO[]
   logs: LogEventDTO[]
   agentRuns: AgentRunDTO[]
   approvals: ApprovalDTO[]
-  previous: IncidentDTO[]
+  previous: PreviousSimilarDTO[]
   repairAttempt: {
     id: string
     attemptId: string
@@ -185,6 +213,10 @@ export interface IncidentDetailDTO extends IncidentDTO {
   telegram: {
     deliveries: TelegramDeliveryDTO[]
   }
+  gmail: {
+    deliveries: GmailDeliveryDTO[]
+  }
+  learning: RepairMemoryDTO | null
   terminalSummary: IncidentTerminalDTO | null
 }
 

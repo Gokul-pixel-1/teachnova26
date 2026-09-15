@@ -364,6 +364,9 @@ async function restartDevServer(extraEnv = {}) {
       FAULT_INJECTION_ENABLED: 'true',
       AUTH_GUARD_ENABLED: 'false',
       AUTO_REPAIR: 'true',
+      // Hermetic TEST servers must NEVER send real email: blank only the
+      // refresh token (production .env keeps the real token).
+      GMAIL_REFRESH_TOKEN: '',
       ...extraEnv,
     },
     detached: true,

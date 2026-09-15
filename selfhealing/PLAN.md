@@ -2572,3 +2572,29 @@ Validation:
 - `npx tsc --noEmit` EXIT 0; `npx eslint` 0 errors on all touched paths (removed an unused `eslint-disable`; pre-existing `useEffect` dep warning in `overview-client.tsx` untouched); `node --check` clean on the new verifier.
 - Schema verified against the live DB: `AgentName` includes `ANALYZER`; `patch_records` has the four added nullable columns; no data destroyed.
 - NOT yet run (honest): live automatic-repair verification, `verify-self-healing-complete.mjs`, `verify-auto-repair.mjs` + regressions, real Groq/AUTO_REPAIR end-to-end, and the score-transition assertions in a live run — the dev server on :3000 was not started for this documentation pass; these remain before the task can be marked complete. `verify-observability.mjs` should continue to pass because the legacy three fields are unchanged.
+
+### 2026-09-15 — Final 3 demos verified live (REAL Groq + real Gmail), LOW-04 guard fix
+
+Changed:
+- Fixed dead LOW-04 fault guard in `frontend/app/api/posts/[id]/comments/route.ts`: the throw was nested inside `if (isFaultActive('INC-00137'))` (not a fault id, always false) so the fault never fired. Removed the bogus inner condition — now throws `Injected comment failure` while LOW-04 is active. 3-line fix, no architecture change.
+- Restarted the :3000 dev server once to pick up `GMAIL_REFRESH_TOKEN` (server predated the token; all state is DB-persisted so nothing was lost).
+
+Validation (all live, REAL mode `qwen/qwen3.8-27b`, DB as source of truth):
+- Demo 1 POST ERROR (MEDIUM-01): real POST 500s → INC-00173 MEDIUM → Coder/Critic/Judge round 1 (CODER_ACCEPTED, Judge APPROVE) → MEDIUM → WAITING_APPROVAL + real Gmail `MEDIUM_RISK_APPROVAL_REQUIRED` SENT (message id persisted) → human PROCEED (APR-448900 CONSUMED) → patch applied only after approval (PatchRecord created after proceed) → POST 201 (real post) → RESOLVED, no rollback needed → Gmail + Telegram FINAL_SUMMARY SENT → memory RESOLVED reward 90 + experience stored. Stale first attempt APR-651471 expired PENDING (honest history, never applied).
+- Demo 2 CYBER ATTACK (localhost only): No-AI :3001 — 61 forged logins → degraded (40) → unavailable (60), health 503, recovered by restart. AI :3000 — detected + blocked 0.1s after first failure, 53×429 to attack, INC-00174 HIGH created, legitimate POST 201 during mitigation, phase `mitigating`. Caveat: AI overall health read `unavailable` from the pre-existing 24h server-error window (historical fault-demo errors), not from the attack.
+- Demo 3 COMMENT ERROR (LOW-04): real comment 500s → INC-00175 LOW → auto-triggered ANALYZER/CODER/CRITIC/JUDGE (all COMPLETE) → auto-apply (LOW) → comment 201 → RESOLVED → memory RESOLVED reward 50 + Gmail FINAL_SUMMARY SENT. Previous repair memories are retrieved as evidence hints (signature-first, capped 4) but never blindly reused — every repair still passes Critic/Judge + live validation.
+- `npx tsc --noEmit` exit 0; `npx eslint` on the touched route exit 0. Full suites deliberately not re-run (demos themselves are the live evidence). Cleanup: faults active=0, all demo posts/comments deleted.
+
+Reason:
+- User scope lock: finish only these 3 end-to-end demos, no new features or fault types, reuse existing engine/Gmail/OAuth, no faked results.
+
+### 2026-09-15 — POST flow corrected: guard-aware severity + removal-patch discipline (INC-00178 WAITING_FOR_APPROVAL)
+
+Changed:
+- `frontend/lib/server/repair/log-monitor.ts` `faultFor`: the registry tier now applies only when the named fault's runtime guard is actually active (`isFaultActive`). An identical message with the guard inactive (genuine source corruption, e.g. the unconditional LOW-01 throw committed into `app/api/posts/route.ts`) falls through to the structural mapping → POST write path → MEDIUM. The LOW-01 controlled runtime demo still classifies LOW when its guard is engaged.
+- `frontend/lib/ai/prompts.ts` CASE-B discipline corrected per explicit instruction: Coder must REMOVE the unguarded faulty construct and restore the normal path (never guard-wrap instead, never fake success); Critic ACCEPTs only removal patches that keep create/persist reachable with auth/validation/serialization intact and no unrelated changes; Judge guided to rate a broken user-visible write path at least MEDIUM. Deterministic engine risk (`classifyPatchRisk`, incident MEDIUM → MEDIUM → approval gate) unchanged and is the real gate.
+
+Validation (live, REAL Groq, DB source of truth):
+- Fresh POST 500s → INC-00178 MEDIUM (`faultId: null`) → auto Analyzer/Coder/Critic/Judge all COMPLETE → removal candidate (deletes throw+comment, rejoins `const createData`, null runtimeRepair) → Critic ACCEPT → Judge APPROVE risk MEDIUM 95% → WAITING_APPROVAL, APR-921465 PENDING (5-min) → real Gmail `MEDIUM_RISK_APPROVAL_REQUIRED` SENT → patch_records 0, source untouched. STOPPED for human Gmail APPROVE (not yet clicked).
+- Stale guard-wrap candidate on INC-00177 (old prompts) honestly REJECTed via API — approval REJECTED, zero file writes (throw still at line 59), incident AI_REPAIR_FAILED with terminal notifications.
+- `npx tsc --noEmit` clean except pre-existing `app/api/posts/route.ts` null-narrowing notes from the uncommitted CASE-B state (I did not touch that file; dev runtime unaffected).

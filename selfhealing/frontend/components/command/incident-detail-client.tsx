@@ -31,6 +31,25 @@ import {
   statusTone,
 } from './ui'
 
+/** Canonical approval state for the dashboard (all values from the DB). */
+function approvalState(incident: IncidentDetailDTO): string {
+  if (incident.approvals.length === 0) return 'NOT_REQUIRED'
+  const latest = incident.approvals[0]
+  if (latest.status === 'PENDING') return 'WAITING_FOR_APPROVAL'
+  if (latest.status === 'APPROVED' || latest.status === 'CONSUMED') return 'APPROVED'
+  if (latest.status === 'REJECTED') return 'REJECTED'
+  if (latest.status === 'EXPIRED') return 'EXPIRED'
+  return latest.status
+}
+
+function approvalStateTone(state: string): 'success' | 'warning' | 'danger' | 'info' | 'neutral' {
+  if (state === 'APPROVED') return 'success'
+  if (state === 'WAITING_FOR_APPROVAL') return 'warning'
+  if (state === 'REJECTED' || state === 'EXPIRED') return 'danger'
+  if (state === 'NOT_REQUIRED') return 'info'
+  return 'neutral'
+}
+
 export function IncidentDetailClient({ id }: { id: string }) {
   const [downloading, setDownloading] = useState(false)
   const [downloadError, setDownloadError] = useState<string | null>(null)
@@ -341,6 +360,7 @@ export function IncidentDetailClient({ id }: { id: string }) {
           icon="shield"
           title="Human Approval History"
           hint="workflow decisions only — nothing is applied without these"
+          extra={<Pill tone={approvalStateTone(approvalState(incident))}>{approvalState(incident)}</Pill>}
         />
         {pendingApprovals.length > 0 && (
           <div
@@ -357,7 +377,7 @@ export function IncidentDetailClient({ id }: { id: string }) {
               </p>
             </div>
             <p className="text-xs leading-relaxed text-bh-muted">
-              PROCEED applies this HIGH-risk candidate, then runs live validation probes and rolls
+              PROCEED applies this {incident.severity === 'HIGH' ? 'HIGH' : incident.severity === 'MEDIUM' ? 'MEDIUM' : 'elevated'}-risk candidate, then runs live validation probes and rolls
               back on failure. REJECT closes the incident without applying any code change.
             </p>
             <div className="flex flex-wrap gap-2">
@@ -541,6 +561,111 @@ export function IncidentDetailClient({ id }: { id: string }) {
         )}
       </Card>
 
+      {/* Alert delivery (Gmail) */}
+      <Card>
+        <CardHeader
+          icon="mail"
+          title="Gmail Delivery"
+          hint="append-only Gmail delivery log · SENT / FAILED / SKIPPED_DUPLICATE"
+          extra={incident.gmail.deliveries.length > 0 ? <Pill tone="accent">{incident.gmail.deliveries.length}</Pill> : null}
+        />
+        {incident.gmail.deliveries.length === 0 ? (
+          <EmptyState
+            icon="mail"
+            title="No Gmail deliveries"
+            message="No Gmail notification has been attempted for this incident yet."
+          />
+        ) : (
+          <ul className="divide-y divide-bh-line/60">
+            {incident.gmail.deliveries.map((delivery) => (
+              <li key={delivery.id} className="flex items-start gap-3 px-4 py-3">
+                <span
+                  className={cn(
+                    'mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full',
+                    delivery.deliveryStatus === 'SENT'
+                      ? 'bg-bh-success/15 text-bh-success'
+                      : delivery.deliveryStatus === 'SKIPPED_DUPLICATE'
+                        ? 'bg-bh-warning/15 text-bh-warning'
+                        : 'bg-bh-danger/15 text-bh-danger',
+                  )}
+                  aria-hidden="true"
+                >
+                  <Icon
+                    name={delivery.deliveryStatus === 'SENT' ? 'check' : delivery.deliveryStatus === 'SKIPPED_DUPLICATE' ? 'mail' : 'x'}
+                    size={13}
+                  />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-sm font-medium text-bh-ink">
+                    {delivery.deliveryStatus === 'SENT'
+                      ? `Delivered · ${delivery.gmailMessageId ?? 'message recorded'}`
+                      : delivery.deliveryStatus === 'SKIPPED_DUPLICATE'
+                        ? 'Skipped — duplicate already SENT'
+                        : delivery.error ?? `Failed (${delivery.deliveryStatus})`}
+                  </p>
+                  <p className="mt-0.5 truncate text-xs text-bh-muted">{delivery.subject}</p>
+                  <p className="mt-0.5 truncate font-mono text-[11px] text-bh-faint">
+                    {delivery.type}
+                    {delivery.severity ? ` · ${delivery.severity}` : ''} · {fullStamp(delivery.createdAt)}
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+
+      {/* Repair reward (learning signal — outcome-only, never for applying) */}
+      <Card>
+        <CardHeader
+          icon="sparkles"
+          title="Repair Reward"
+          hint="transparent outcome-based learning signal"
+          extra={
+            incident.learning ? (
+              <Pill tone={incident.learning.reward > 0 ? 'success' : incident.learning.reward < 0 ? 'danger' : 'neutral'}>
+                {incident.learning.reward > 0 ? `+${incident.learning.reward}` : `${incident.learning.reward}`}
+              </Pill>
+            ) : null
+          }
+        />
+        {!incident.learning ? (
+          <EmptyState
+            icon="sparkles"
+            title="No learning record yet"
+            message="A normalized repair experience is stored when this incident reaches a terminal state."
+          />
+        ) : (
+          <div className="px-4 py-3">
+            <dl className="rounded-lg bg-bh-surface-2 p-3 text-xs">
+              <div className="flex items-baseline justify-between gap-3 border-b border-bh-line/60 py-1.5">
+                <dt className="text-bh-muted">Outcome</dt>
+                <dd className="font-mono font-medium text-bh-ink">{incident.learning.outcome}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-3 border-b border-bh-line/60 py-1.5">
+                <dt className="text-bh-muted">Human decision</dt>
+                <dd className="font-mono font-medium text-bh-ink">{incident.learning.humanDecision ?? '—'}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-3 border-b border-bh-line/60 py-1.5">
+                <dt className="text-bh-muted">Recurrences</dt>
+                <dd className="font-mono font-medium text-bh-ink">{incident.learning.recurrenceCount}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-3 py-1.5">
+                <dt className="text-bh-muted">Breakdown</dt>
+                <dd className="text-right font-mono font-medium text-bh-ink">
+                  {incident.learning.rewardBreakdown && Object.keys(incident.learning.rewardBreakdown).length > 0
+                    ? Object.entries(incident.learning.rewardBreakdown)
+                        .map(([k, v]) => `${k} ${v > 0 ? '+' : ''}${v}`)
+                        .join(' · ')
+                    : '—'}
+                </dd>
+              </div>
+            </dl>
+            <p className="mt-2 font-mono text-[11px] text-bh-faint">signature {incident.learning.errorSignature.slice(0, 80)}</p>
+          </div>
+        )}
+      </Card>
+
       {/* Previous similar incidents */}
       <Card>
         <CardHeader
@@ -571,6 +696,13 @@ export function IncidentDetailClient({ id }: { id: string }) {
                   <span className={cn('text-xs', statusTone(previous.status))}>
                     {previous.status}
                   </span>
+                  {(previous.outcome ?? previous.reward != null) && (
+                    <span className="font-mono text-[11px] text-bh-faint">
+                      {previous.outcome ?? ''}
+                      {previous.reward != null ? ` · ${previous.reward > 0 ? '+' : ''}${previous.reward}` : ''}
+                      {previous.humanDecision ? ` · human ${previous.humanDecision}` : ''}
+                    </span>
+                  )}
                   <span className="min-w-0 flex-1 truncate text-sm text-bh-ink">{previous.title}</span>
                   <span className="font-mono text-[11px] text-bh-faint">
                     {fullStamp(previous.createdAt).slice(0, 10)}

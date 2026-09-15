@@ -230,7 +230,7 @@ async function crashFaultCycle(op, preOpenIds, { faultId, trigger, expectTrigger
 
   if (run.json?.stage === 'WAITING_APPROVAL') {
     check(
-      `${faultId} HIGH risk requires a human decision`,
+      `${faultId} ${run.json?.risk ?? 'elevated'} risk requires a human decision`,
       run.json.requiresApproval === true && !!run.json.approvalId,
       JSON.stringify(run.json),
     )
@@ -456,6 +456,9 @@ async function restartDevServer() {
       AI_PROVIDER: 'test',
       FAULT_INJECTION_ENABLED: 'true',
       AUTH_GUARD_ENABLED: 'false',
+      // Hermetic TEST servers must NEVER send real email (see
+      // verify-gmail-approval.mjs): blank only the refresh token.
+      GMAIL_REFRESH_TOKEN: '',
     },
     detached: true,
     stdio: 'ignore',
@@ -492,7 +495,7 @@ async function run() {
   console.log('\nFault Injection API')
   const faultsList = await op.get('/api/faults')
   check('GET /api/faults → 200 + enabled', faultsList.status === 200 && faultsList.json?.enabled === true, `status=${faultsList.status} enabled=${faultsList.json?.enabled}`)
-  check('9 faults registered', faultsList.json?.total === 9, `got ${faultsList.json?.total}`)
+  check('10 faults registered', faultsList.json?.total === 10, `got ${faultsList.json?.total}`)
   for (const id of ['LOW-01', 'LOW-02', 'LOW-03', 'MEDIUM-01', 'MEDIUM-02', 'MEDIUM-03', 'HIGH-01', 'HIGH-02', 'HIGH-03']) {
     const fault = faultsList.json?.faults?.find((f) => f.id === id)
     check(`Fault registry has ${id}`, !!fault, 'not found')

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Canonical incident-briefing verification (17 Teleind checks).
+ * Canonical incident-briefing verification (18 Teleind checks + Gmail honesty).
  *
  * Verifies — against REAL persisted state, never fabricated — that every
  * Telegram message an incident produced is built from the SAME canonical brief
@@ -8,7 +8,8 @@
  * that drives the incident-detail terminal card, the PDF report and the AI chat.
  *
  * Scenario coverage (context-aware; a check passes when its scenario has data):
- *   A) LOW/MEDIUM auto-repair ESCALATION + FINAL_SUMMARY
+ *   A) LOW auto-repair ESCALATION + FINAL_SUMMARY
+ *   A2) MEDIUM approval-required + PROCEED/REJECT flow
  *   B) HIGH-approval PROCEED → RESOLVED
  *   C) HIGH-approval REJECTED → REJECTED terminal, no code change
  *   D) approval EXPIRED → EXPIRED terminal, no code change
@@ -158,7 +159,7 @@ async function readSseLifecycle() {
 
 async function main() {
   const env = loadEnv()
-  console.log('# BuildHub canonical incident-briefing verification (17 checks)')
+  console.log('# BuildHub canonical incident-briefing verification (18 checks)')
   console.log(`BASE=${BASE} · DATABASE_URL=${env.DATABASE_URL ? 'present' : 'MISSING'}`)
 
   if (!env.DATABASE_URL) {
@@ -208,15 +209,20 @@ async function main() {
   const finals = canonicalSent.filter((r) => r.type === 'FINAL_SUMMARY')
   const incidentMsgs = canonicalSent.filter((r) => r.type === 'INCIDENT')
   const escalations = canonicalSent.filter((r) => r.type === 'ESCALATION')
-  const approvalReqs = canonicalSent.filter((r) => r.type === 'HIGH_RISK_APPROVAL_REQUIRED')
+  const approvalReqs = canonicalSent.filter((r) => r.type === 'HIGH_RISK_APPROVAL_REQUIRED' || r.type === 'MEDIUM_RISK_APPROVAL_REQUIRED')
   const attackIncidents = incidents.filter((i) => i.detectedBy && /security-log-analyzer/i.test(i.detectedBy))
+
+  const gmailRows = await prisma.gmailNotification.findMany({
+    orderBy: { createdAt: 'asc' },
+    select: { incidentId: true, type: true, deliveryStatus: true, subject: true, message: true, gmailMessageId: true, error: true },
+  })
 
   console.log(`incidents=${incidents.length} · deliveries=${deliveries.length} · SENT=${sent.length} · canonical=${canonicalSent.length} (legacy=${sent.length - canonicalSent.length})`)
 
   // ── 1. Schema: briefing message types exist ──────────────────────────────
   const types = await prisma.$queryRawUnsafe('SELECT unnest(enum_range(NULL::"NotificationType")) AS v')
   const typeSet = new Set(types.map((row) => row.v))
-  const missing = ['INCIDENT', 'ESCALATION', 'HIGH_RISK_APPROVAL_REQUIRED', 'FINAL_SUMMARY'].filter((t) => !typeSet.has(t))
+  const missing = ['INCIDENT', 'ESCALATION', 'HIGH_RISK_APPROVAL_REQUIRED', 'MEDIUM_RISK_APPROVAL_REQUIRED', 'FINAL_SUMMARY'].filter((t) => !typeSet.has(t))
   check(1, 'Schema: briefing NotificationTypes exist', missing.length === 0, `missing=${missing.join(',') || '—'}`)
 
   // ── 2. Dedupe: at most one SENT per (incident, type) ─────────────────────
@@ -257,16 +263,25 @@ async function main() {
   check(5, 'No fabrication: pending AI steps render as pending, never invented', mixed.length === 0, `mixed=${mixed.length}`)
   mark(incidentMsgs.length ? 'A' : '—')
 
-  // ── 6. LOW/MEDIUM ESCALATION: AUTO-APPLY plan ────────────────────────────
+  // ── 6. LOW ESCALATION: AUTO-APPLY plan (only LOW auto-applies) ──────────
   const badEsc = escalations.filter((row) => {
     const text = stripHtml(row.message)
     return !(/AUTO-APPLY/.test(text) && text.includes('Action: auto-apply') && /RISK/.test(text))
   })
-  check(6, 'LOW/MEDIUM ESCALATION carries the AUTO-APPLY plan', escalations.length === 0 || badEsc.length === 0, `bad=${badEsc.length}`)
+  check(6, 'LOW ESCALATION carries the AUTO-APPLY plan', escalations.length === 0 || badEsc.length === 0, `bad=${badEsc.length}`)
   if (escalations.length) mark('A')
 
+  // ── 6b. MEDIUM approval request contract ─────────────────────────────────
+  const mediumReqs = approvalReqs.filter((r) => r.type === 'MEDIUM_RISK_APPROVAL_REQUIRED')
+  const badMedium = mediumReqs.filter((row) => {
+    const text = stripHtml(row.message)
+    return !(text.includes('Approval:') && text.includes('Reply PROCEED') && text.includes('Reply REJECT') && text.includes('Expires:'))
+  })
+  check('6b', 'MEDIUM approval request carries PROCEED/REJECT + expiry', mediumReqs.length === 0 || badMedium.length === 0, `bad=${badMedium.length}`)
+  if (mediumReqs.length) mark('A2')
+
   // ── 7. HIGH approval request contract ────────────────────────────────────
-  const badApproval = approvalReqs.filter((row) => {
+  const badApproval = approvalReqs.filter((r) => r.type === 'HIGH_RISK_APPROVAL_REQUIRED').filter((row) => {
     const text = stripHtml(row.message)
     return !(text.includes('Approval:') && text.includes('Reply PROCEED') && text.includes('Reply REJECT') && text.includes('Expires:'))
   })
@@ -353,11 +368,28 @@ async function main() {
   // ── 17. No secrets in the stored briefs ──────────────────────────────────
   const tokenPattern = /bot\d{5,}:[A-Za-z0-9_-]{30,}/
   let leaks = 0
-  for (const row of deliveries) {
-    const blob = `${row.message ?? ''} ${row.error ?? ''}`
-    if (tokenPattern.test(blob) || (env.TELEGRAM_BOT_TOKEN && blob.includes(env.TELEGRAM_BOT_TOKEN)) || (env.TELEGRAM_CHAT_ID && blob.includes(env.TELEGRAM_CHAT_ID))) leaks += 1
+  const secretNeedles = [env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_CHAT_ID, env.GMAIL_CLIENT_SECRET, env.GMAIL_REFRESH_TOKEN].filter(Boolean)
+  for (const row of [...deliveries, ...gmailRows]) {
+    const blob = `${row.message ?? ''} ${row.error ?? ''} ${row.subject ?? ''}`
+    if (tokenPattern.test(blob) || secretNeedles.some((s) => s && blob.includes(s))) leaks += 1
   }
-  check(17, 'No tokens/chat-id leak in any stored delivery', leaks === 0, `leaks=${leaks}`)
+  check(17, 'No tokens/chat-id/Gmail secrets leak in any stored delivery', leaks === 0, `leaks=${leaks}`)
+
+  // ── 18. Gmail honesty: dedupe + no fake SENT ─────────────────────────────
+  const gmailPairs = groupBy(gmailRows, (r) => `${r.incidentId ?? 'none'}\u0000${r.type}`)
+  let gmailDupes = 0
+  for (const rows of gmailPairs.values()) {
+    if (rows.filter((r) => r.deliveryStatus === 'SENT').length > 1) gmailDupes += 1
+  }
+  const gmailSentNoId = gmailRows.filter((r) => r.deliveryStatus === 'SENT' && !r.gmailMessageId)
+  const gmailFailedNoReason = gmailRows.filter((r) => r.deliveryStatus === 'FAILED' && !r.error)
+  check(
+    18,
+    'Gmail: one SENT per (incident,type); SENT rows carry a provider id; FAILED rows carry a reason',
+    gmailDupes === 0 && gmailSentNoId.length === 0 && gmailFailedNoReason.length === 0,
+    `dupes=${gmailDupes} sentNoId=${gmailSentNoId.length} failedNoReason=${gmailFailedNoReason.length}`,
+  )
+  if (gmailRows.length) mark('GMAIL')
 
   await prisma.$disconnect()
 

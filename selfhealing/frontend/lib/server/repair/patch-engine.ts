@@ -161,7 +161,7 @@ export async function applyCandidate(
       function: candidate.function,
       status: 'CHECKPOINTED',
       risk: attempt.risk ?? null,
-      requiresApproval: (attempt.risk ?? 'LOW') === 'HIGH',
+      requiresApproval: (attempt.risk ?? 'LOW') === 'HIGH' || (attempt.risk ?? 'LOW') === 'MEDIUM',
     },
   })
 
@@ -391,7 +391,7 @@ export async function applyRuntimeRepair(
       function: 'Runtime fault restore (no source edit)',
       status: 'CHECKPOINTED',
       risk: attempt.risk ?? null,
-      requiresApproval: (attempt.risk ?? 'LOW') === 'HIGH',
+      requiresApproval: (attempt.risk ?? 'LOW') === 'HIGH' || (attempt.risk ?? 'LOW') === 'MEDIUM',
     },
   })
 

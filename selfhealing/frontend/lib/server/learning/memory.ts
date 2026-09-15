@@ -28,6 +28,8 @@ export interface RewardPolicy {
   rejection: number
   humanApproval: number
   humanRejection: number
+  /** Same error returned after a repair was recorded successful. */
+  regression: number
 }
 
 function intEnv(name: string, fallback: number): number {
@@ -36,16 +38,26 @@ function intEnv(name: string, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-/** Injectable, environment-tunable reward weights (Phase 10 FINAL PASS values). */
+/** Injectable, environment-tunable reward weights.
+ *
+ * FINAL POLICY (outcome-only, never for merely applying a patch):
+ *   RESOLVED (+human approval shaping) → positive
+ *   ROLLED_BACK / AI_REPAIR_FAILED     → negative
+ *   REJECTED (human stopped pre-apply) → 0: a rejection is information about
+ *     an unsafe proposal, never a coding success and never a failure either.
+ *   regression (same error returns after a recorded success) → strong negative
+ *     applied to the earlier success claim.
+ */
 export function getRewardPolicy(): RewardPolicy {
   return {
     successfulRepair: intEnv('REPAIR_REWARD_SUCCESS', 50),
     validationFailure: intEnv('REPAIR_REWARD_VALIDATION_FAILURE', -50),
     rollback: intEnv('REPAIR_REWARD_ROLLBACK', -75),
     securityRegression: intEnv('REPAIR_REWARD_SECURITY_REGRESSION', -100),
-    rejection: intEnv('REPAIR_REWARD_REJECTION', 20),
+    rejection: intEnv('REPAIR_REWARD_REJECTION', 0),
     humanApproval: intEnv('REPAIR_REWARD_HUMAN_APPROVAL', 40),
-    humanRejection: intEnv('REPAIR_REWARD_HUMAN_REJECTION', 2),
+    humanRejection: intEnv('REPAIR_REWARD_HUMAN_REJECTION', 0),
+    regression: intEnv('REPAIR_REWARD_REGRESSION', -100),
   }
 }
 
@@ -70,7 +82,10 @@ export function computeReward(input: RewardInput): {
 
   if (input.outcome === 'RESOLVED') breakdown.successfulRepair = policy.successfulRepair
   if (input.outcome === 'ROLLED_BACK') breakdown.rollback = policy.rollback
-  if (input.outcome === 'ROLLED_BACK' || input.outcome === 'AI_REPAIR_FAILED' || input.outcome === 'REJECTED') {
+  // Validation actually ran and failed. A human REJECTED repair never reached
+  // validation, so it carries no validation penalty — only the (zero) rejection
+  // information term below.
+  if (input.outcome === 'ROLLED_BACK' || input.outcome === 'AI_REPAIR_FAILED') {
     breakdown.validationFailure = policy.validationFailure
   }
   if ((input.outcome === 'ROLLED_BACK' || input.outcome === 'AI_REPAIR_FAILED') && securitySensitive(input.incident)) {
@@ -97,13 +112,57 @@ export interface MemoryInput {
   humanReason?: string | null
 }
 
+/** Canonical error signature: the log-monitor's FNV signature when present
+ * (same key incidents merge on), else the coarse error-code fallback. */
+export function signatureFor(incident: Incident): string {
+  const meta = (incident.metadata ?? null) as { errorSignature?: unknown } | null
+  const sig = meta && typeof meta.errorSignature === 'string' ? meta.errorSignature : ''
+  if (sig.trim()) return sig.slice(0, 200)
+  return (incident.errorCode ?? incident.title ?? 'repair').slice(0, 200)
+}
+
+/**
+ * Regression check: if the same error signature returns after an earlier
+ * repair was recorded RESOLVED, the earlier success claim was wrong — apply
+ * the strong regression penalty to the old memory and count the recurrence.
+ * This is the "same error comes again" learning rule.
+ */
+export async function applyRegressionPenalty(errorSignature: string, newIncidentId: string): Promise<number> {
+  const policy = getRewardPolicy()
+  const prior = await prisma.repairMemory.findMany({
+    where: { errorSignature, outcome: 'RESOLVED', NOT: { incidentId: newIncidentId } },
+    select: { id: true, incidentId: true, recurrenceCount: true, reward: true, rewardBreakdown: true },
+  })
+  for (const row of prior) {
+    const breakdown = { ...((row.rewardBreakdown ?? {}) as Record<string, number>), regression: policy.regression };
+    await prisma.repairMemory.update({
+      where: { id: row.id },
+      data: {
+        recurrenceCount: row.recurrenceCount + 1,
+        reward: row.reward + policy.regression,
+        rewardBreakdown: breakdown as Prisma.InputJsonValue,
+      },
+    })
+    await logger.warn({
+      service: 'learning',
+      message: `Regression: signature ${errorSignature} returned after RESOLVED (incident ${row.incidentId}) — penalty ${policy.regression} applied, recurrence #${row.recurrenceCount + 1}`,
+      status: 200,
+      incidentId: newIncidentId,
+    })
+  }
+  return prior.length
+}
+
 export async function recordRepairMemory(input: MemoryInput): Promise<void> {
-  const { reward } = computeReward({
+  const { reward, breakdown } = computeReward({
     incident: input.incident,
     outcome: input.outcome,
     humanDecision: input.humanDecision ?? null,
   })
-  const errorSignature = (input.incident.errorCode ?? input.incident.title ?? 'repair').slice(0, 200)
+  const errorSignature = signatureFor(input.incident)
+  // A new incident for a previously-resolved signature means the old fix did
+  // not hold — penalize the old claim before recording the new outcome.
+  await applyRegressionPenalty(errorSignature, input.incident.id)
 
   const existing = await prisma.repairMemory.findUnique({
     where: { incidentId: input.incident.id },
@@ -122,6 +181,7 @@ export async function recordRepairMemory(input: MemoryInput): Promise<void> {
         humanDecision: input.humanDecision ?? existing.humanDecision,
         humanReason: input.humanReason ?? existing.humanReason,
         reward,
+        rewardBreakdown: breakdown as Prisma.InputJsonValue,
         recurrenceCount: existing.recurrenceCount + 0,
       },
     })
@@ -142,6 +202,7 @@ export async function recordRepairMemory(input: MemoryInput): Promise<void> {
       humanDecision: input.humanDecision ?? null,
       humanReason: input.humanReason ?? null,
       reward,
+      rewardBreakdown: breakdown as Prisma.InputJsonValue,
     },
   })
 }
@@ -159,7 +220,7 @@ export interface ExperienceInput {
 }
 
 export async function recordRepairExperience(input: ExperienceInput): Promise<void> {
-  const { reward } = computeReward({
+  const { reward, breakdown } = computeReward({
     incident: input.incident,
     outcome: input.outcome,
     humanDecision: input.humanDecision ?? null,
@@ -172,6 +233,7 @@ export async function recordRepairExperience(input: ExperienceInput): Promise<vo
       state: input.state as Prisma.InputJsonValue,
       action: input.action as Prisma.InputJsonValue,
       reward,
+      rewardBreakdown: breakdown as Prisma.InputJsonValue,
       nextState: input.nextState as Prisma.InputJsonValue,
       terminal: input.terminal,
       outcome: input.outcome,
@@ -201,7 +263,7 @@ export async function recordHumanFeedback(input: {
   if (!memory || !incident) {
     return { ok: false, reason: 'no memory record found for this incident' }
   }
-  const { reward } = computeReward({
+  const { reward, breakdown } = computeReward({
     incident,
     outcome: memory.outcome as RepairOutcome,
     humanDecision: input.decision,
@@ -212,6 +274,7 @@ export async function recordHumanFeedback(input: {
       humanDecision: input.decision,
       humanReason: input.reason ?? null,
       reward,
+      rewardBreakdown: breakdown as Prisma.InputJsonValue,
     },
   })
   await prisma.repairExperience.updateMany({

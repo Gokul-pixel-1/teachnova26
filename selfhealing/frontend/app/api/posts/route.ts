@@ -49,16 +49,7 @@ export async function POST(request: Request) {
       }
     }
 
-    /*
-     * LOW-01 INTENTIONAL RUNTIME ERROR
-     *
-     * This is intentionally active for the self-healing demonstration.
-     * The source remains syntactically valid, but POST /api/posts
-     * cannot create a post and returns HTTP 500.
-     */
-    if (isFaultActive('LOW-01')) {
-    throw new Error('LOW-01: Post creation service failure')
-    }
+
 
     const createData: Omit<
       Prisma.PostUncheckedCreateInput,

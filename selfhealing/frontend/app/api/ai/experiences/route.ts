@@ -30,6 +30,7 @@ export async function GET() {
         method: e.incident?.method ?? null,
         outcome: e.outcome,
         reward: e.reward,
+        rewardBreakdown: (e.rewardBreakdown ?? null) as Record<string, number> | null,
         terminal: e.terminal,
         humanDecision: e.humanDecision,
         createdAt: e.createdAt.toISOString(),

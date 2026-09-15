@@ -167,22 +167,32 @@ export async function collectEvidence(incident: Incident): Promise<RepairEvidenc
   const sourceLine = metadata?.sourceLine ?? null
   const memoryHints: RepairEvidence['memoryHints'] = []
   try {
+    const { signatureFor } = await import('@/lib/server/learning/memory')
+    const signature = signatureFor(incident)
+    // Same-signature memories first (the "seen this error before" signal),
+    // then endpoint/file/code fallbacks. Newest first, capped.
     const memories = await prisma.repairMemory.findMany({
       where: {
         OR: [
+          { errorSignature: signature },
           ...(incident.endpoint ? [{ endpoint: incident.endpoint }] : []),
           ...(sourceFile ? [{ file: sourceFile }] : []),
           ...(incident.errorCode ? [{ rootCause: { contains: incident.errorCode } }] : []),
         ],
       },
-      take: 3,
+      take: 4,
       orderBy: { updatedAt: 'desc' },
     })
+    memories.sort((a, b) => Number(b.errorSignature === signature) - Number(a.errorSignature === signature))
     for (const memory of memories) {
       memoryHints.push({
         rootCause: memory.rootCause ?? '',
         patchSummary: memory.patchSummary ?? '',
         outcome: memory.outcome,
+        reward: memory.reward,
+        recurrenceCount: memory.recurrenceCount,
+        humanDecision: memory.humanDecision,
+        signatureMatch: memory.errorSignature === signature,
       })
     }
   } catch {

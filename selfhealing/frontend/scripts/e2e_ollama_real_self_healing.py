@@ -214,7 +214,7 @@ def crash_cycle(op, fault_id, trigger, expect_trigger, verifier, pre_open):
           run in ("WAITING_APPROVAL", "RESOLVED", "ROLLED_BACK"),
           f"stage={run}")
     if run == "WAITING_APPROVAL":
-        check(f"{fault_id} HIGH risk requires a human decision", True)
+        check(f"{fault_id} elevated risk requires a human decision", True)
         detail = poll_incident(op, incident_id, lambda d: d.get("approvals") or d.get("status") == "WAITING_APPROVAL")
         approvals = (detail or {}).get("approvals") or []
         approval_id = approvals[0].get("approvalId") if approvals else None

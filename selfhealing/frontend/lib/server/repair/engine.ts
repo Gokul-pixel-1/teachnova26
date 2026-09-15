@@ -6,10 +6,11 @@ import 'server-only'
 //   patch (auto or approval) → real validation → RESOLVED | ROLLED_BACK |
 //   AI_REPAIR_FAILED. Every stage is persisted; nothing is random.
 //
-// Flow by risk tier:
-//   LOW / MEDIUM  → auto-apply with live validation (rollback on failure)
-//   HIGH          → human approval first (same approval state machine), then
-//                   the SAME apply/validate/rollback path
+// Flow by risk tier (FINAL POLICY):
+//   LOW             → auto-apply with live validation (rollback on failure)
+//   MEDIUM / HIGH   → human approval first (same approval state machine,
+//                     Gmail + Telegram approval request), then the SAME
+//                     apply/validate/rollback path
 
 import { prisma } from '@/lib/server/db'
 import { collectEvidence } from './evidence'
@@ -22,14 +23,15 @@ import type { RepairOptions } from './conversation'
 import { classifyPatchRisk, type PatchRisk } from './risk'
 import { verifyCandidate, applyCandidate, applyRuntimeRepair } from './patch-engine'
 import { deactivateFaultsForEndpoint } from '@/lib/server/fault-injection'
-import { createApproval, consumeApproval } from '@/lib/server/approval'
+import { createApproval, consumeApproval, rejectApproval } from '@/lib/server/approval'
 import { sendTelegram } from '@/lib/server/telegram'
+import { sendApprovalEmail, sendFinalEmail } from '@/lib/server/gmail'
 import {
   sendIncidentTerminalSummary,
   sendRepairPlanMessage,
   buildApprovalRequiredMessage,
 } from '@/lib/server/notifications/summary'
-import { recordRepairMemory, recordRepairExperience } from '@/lib/server/learning/memory'
+import { recordRepairMemory, recordRepairExperience, recordHumanFeedback } from '@/lib/server/learning/memory'
 import { recommendAction, confidenceBucket } from '@/lib/server/learning/decision'
 import { providerModeLabel } from '@/lib/server/provider'
 import { addIncidentEvent } from './events'
@@ -54,6 +56,7 @@ export interface RepairRunResult {
   roundsUsed: number
   rollback: boolean
   telegram: { sent: boolean; reason: string }
+  gmail: { sent: boolean; reason: string }
 }
 
 export async function runSelfHealingRepair(
@@ -75,6 +78,7 @@ export async function runSelfHealingRepair(
       roundsUsed: 0,
       rollback: false,
       telegram: { sent: false, reason: 'incident not found' },
+      gmail: { sent: false, reason: 'incident not found' },
     }
   }
 
@@ -143,6 +147,7 @@ export async function runSelfHealingRepair(
       roundsUsed: conversation.roundsUsed,
       rollback: false,
       telegram: failure.telegram,
+      gmail: failure.gmail,
     }
   }
 
@@ -176,6 +181,7 @@ export async function runSelfHealingRepair(
         roundsUsed: conversation.roundsUsed,
         rollback: false,
         telegram: failure.telegram,
+        gmail: failure.gmail,
       }
     }
   }
@@ -206,26 +212,30 @@ export async function runSelfHealingRepair(
     })
   }
 
-  if (risk === 'HIGH') {
+  // MEDIUM / HIGH: STOP before PATCH. Create a one-time human approval,
+  // notify on both channels (Telegram + Gmail with one-click tokens), and
+  // return WAITING_APPROVAL. No apply, no validation until a human decides.
+  if (risk === 'HIGH' || risk === 'MEDIUM') {
     const approval = await createApproval({
       incidentId: incident.id,
       patchId: `PATCH-${candidate.file.replace(/\//g, '-')}`,
       operator: 'system',
       repairAttemptId: attempt.id,
     })
-    await updateAttemptStatus(attempt.id, 'WAITING_APPROVAL', { risk, riskReason: `HIGH risk: human approval required (${approval.approvalId})` })
+    await updateAttemptStatus(attempt.id, 'WAITING_APPROVAL', { risk, riskReason: `${risk} risk: human approval required (${approval.approvalId})` })
     await prisma.incident.update({
       where: { id: incident.id },
-      data: { status: 'WAITING_APPROVAL', summary: `Awaiting human approval ${approval.approvalId} for HIGH-risk patch.` },
+      data: { status: 'WAITING_APPROVAL', summary: `Awaiting human approval ${approval.approvalId} for ${risk}-risk patch.` },
     })
-    await addIncidentEvent(incident.id, 'AWAITING_REVIEW', 'HIGH-risk patch awaiting approval', approval.approvalId)
-    trace('APPROVAL', `HIGH-risk patch ${candidate.file} requires human approval ${approval.approvalId}`, {
+    await addIncidentEvent(incident.id, 'AWAITING_REVIEW', `${risk}-risk patch awaiting approval`, approval.approvalId)
+    trace('APPROVAL', `${risk}-risk patch ${candidate.file} requires human approval ${approval.approvalId}`, {
       incidentRef: incident.ref,
       incidentId: incident.id,
       route: incident.endpoint,
       method: incident.method,
     })
-    const telegram = await notifyApproval(incident)
+    const telegram = await notifyApproval(incident, risk)
+    const gmail = await notifyApprovalEmail(incident, risk, approval.approvalId)
 
     return {
       ok: true,
@@ -241,11 +251,12 @@ export async function runSelfHealingRepair(
       roundsUsed: conversation.roundsUsed,
       rollback: false,
       telegram,
+      gmail,
     }
   }
 
-  // LOW / MEDIUM: announce the auto-repair plan (risk policy) then apply +
-  // real validation + rollback. One ESCALATION per incident. Runtime-repair
+  // LOW: announce the auto-repair plan (risk policy) then apply + real
+  // validation + rollback. One ESCALATION per incident. Runtime-repair
   // candidates restore normal runtime behavior; file candidates are patched.
   await sendRepairPlanMessage(incident)
   const decision = candidate.runtimeRepair
@@ -285,8 +296,8 @@ export async function runSelfHealingRepair(
     await persistLearning(incident, attempt, candidate, risk, 'RESOLVED', evidence, decision.validation.probes.every((p) => p.ok) ? 'validation passed' : null)
 
     const telegram = await notifyTerminal(incident)
-    await traceScores(decision.validation.probes)
-    trace('FINAL', `${incident.ref} RESOLVED via auto-repair (${decision.record.patchId}) — telegram ${telegram.sent ? 'sent' : `not sent: ${telegram.reason}`}`, {
+    await traceScores(decision.validation.probes);
+    trace('FINAL', `${incident.ref} RESOLVED via auto-repair (${decision.record.patchId}) — telegram ${telegram.telegram.sent ? 'sent' : `not sent: ${telegram.telegram.reason}`}`, {
       incidentRef: incident.ref,
       incidentId: incident.id,
       route: incident.endpoint,
@@ -305,7 +316,8 @@ export async function runSelfHealingRepair(
       conversationStop: conversation.stopReason,
       roundsUsed: conversation.roundsUsed,
       rollback: false,
-      telegram,
+      telegram: telegram.telegram,
+      gmail: telegram.gmail,
     }
   }
 
@@ -354,7 +366,8 @@ export async function runSelfHealingRepair(
     conversationStop: conversation.stopReason,
     roundsUsed: conversation.roundsUsed,
     rollback: true,
-    telegram,
+    telegram: telegram.telegram,
+    gmail: telegram.gmail,
   }
 }
 
@@ -365,7 +378,7 @@ async function finalizeFailure(
   evidence: Awaited<ReturnType<typeof collectEvidence>>,
   risk?: PatchRisk,
   detail?: string,
-): Promise<{ telegram: { sent: boolean; reason: string } }> {
+): Promise<{ telegram: { sent: boolean; reason: string }; gmail: { sent: boolean; reason: string } }> {
   const stage = conversation.stopReason === 'CODER_REJECTED' ? 'REJECTED' : 'AI_REPAIR_FAILED'
   await prisma.incident.update({
     where: { id: incident.id },
@@ -383,7 +396,7 @@ async function finalizeFailure(
   await addIncidentEvent(incident.id, 'INVESTIGATING', stage, (detail ?? conversation.humanBrief).slice(0, 400))
   await persistLearning(incident, attempt, null, risk ?? 'LOW', stage as 'AI_REPAIR_FAILED', evidence, detail ?? conversation.humanBrief)
 
-  const telegram = await notifyTerminal(incident)
+  const terminal = await notifyTerminal(incident)
   trace('FINAL', `${incident.ref} AI_REPAIR_FAILED (stop=${conversation.stopReason}, ${conversation.roundsUsed} round(s)) — no safe candidate produced`, {
     incidentRef: incident.ref,
     incidentId: incident.id,
@@ -391,7 +404,7 @@ async function finalizeFailure(
     method: incident.method,
   })
   await traceScores([])
-  return { telegram }
+  return { telegram: terminal.telegram, gmail: terminal.gmail }
 }
 
 /** Prints the recomputed score set (cyber safety / app reliability / total)
@@ -420,6 +433,7 @@ async function persistLearning(
   outcome: 'RESOLVED' | 'ROLLED_BACK' | 'AI_REPAIR_FAILED',
   evidence: Awaited<ReturnType<typeof collectEvidence>>,
   detail: string | null,
+  humanDecision: 'APPROVED' | 'REJECTED' | null = null,
 ): Promise<void> {
   try {
     const rootCause = candidate?.rootCause ?? detail ?? 'no candidate produced'
@@ -434,6 +448,7 @@ async function persistLearning(
         : `no patch (${detail ?? 'failed'})`,
       risk,
       outcome,
+      humanDecision,
     })
     const memory = await prisma.repairMemory.findUnique({ where: { incidentId: incident.id } })
     await recordRepairExperience({
@@ -462,6 +477,7 @@ async function persistLearning(
       nextState: { incidentStatus: incident.status, resolvedAt: incident.resolvedAt?.toISOString() ?? null },
       terminal: true,
       outcome,
+      humanDecision,
     })
   } catch (err) {
     await logger.warn({
@@ -475,31 +491,71 @@ async function persistLearning(
   }
 }
 
-async function notifyTerminal(incident: Incident): Promise<{ sent: boolean; reason: string }> {
+interface ChannelResult {
+  sent: boolean
+  reason: string
+}
+
+/** Terminal lifecycle notification on BOTH channels (Telegram + Gmail). */
+async function notifyTerminal(incident: Incident): Promise<{ telegram: ChannelResult; gmail: ChannelResult }> {
   const result = await sendIncidentTerminalSummary(incident)
-  if (result.ok) return { sent: true, reason: 'sent (FINAL_SUMMARY)' }
-  if (!result.configured) return { sent: false, reason: 'Telegram not configured' }
-  return { sent: false, reason: `send failed: ${result.error}` }
+  const telegram: ChannelResult = result.ok
+    ? { sent: true, reason: 'sent (FINAL_SUMMARY)' }
+    : !result.configured
+      ? { sent: false, reason: 'Telegram not configured' }
+      : { sent: false, reason: `send failed: ${result.error}` }
+  const gmail = await sendTerminalEmail(incident)
+  return { telegram, gmail }
 }
 
 async function notifyApproval(
   incident: Incident,
+  risk: 'MEDIUM' | 'HIGH',
 ): Promise<{ sent: boolean; reason: string }> {
-  const message = await buildApprovalRequiredMessage(incident)
+  const type = risk === 'MEDIUM' ? 'MEDIUM_RISK_APPROVAL_REQUIRED' : 'HIGH_RISK_APPROVAL_REQUIRED'
+  const message = await buildApprovalRequiredMessage(incident, risk)
   const result = await sendTelegram({
-    type: 'HIGH_RISK_APPROVAL_REQUIRED',
+    type,
     message,
     incidentId: incident.id,
     severity: incident.severity,
   })
-  if (result.ok) return { sent: true, reason: `sent (HIGH_RISK_APPROVAL_REQUIRED)` }
+  if (result.ok) return { sent: true, reason: `sent (${type})` }
   if (!result.configured) return { sent: false, reason: 'Telegram not configured' }
   return { sent: false, reason: `send failed: ${result.error}` }
 }
 
+/** Approval-request email (Gmail) with one-click tokens. Never throws. */
+async function notifyApprovalEmail(
+  incident: Incident,
+  risk: 'MEDIUM' | 'HIGH',
+  approvalId: string,
+): Promise<{ sent: boolean; reason: string }> {
+  try {
+    const result = await sendApprovalEmail({ incident, risk, approvalId })
+    return result.ok
+      ? { sent: true, reason: `sent (${result.deliveryStatus})` }
+      : { sent: false, reason: result.error ?? 'gmail send failed' }
+  } catch (err) {
+    return { sent: false, reason: `gmail failed: ${err instanceof Error ? err.message : 'unknown'}` }
+  }
+}
+
+/** Terminal lifecycle email (Gmail). Never throws. */
+async function sendTerminalEmail(incident: Incident): Promise<{ sent: boolean; reason: string }> {
+  try {
+    const result = await sendFinalEmail({ incident })
+    return result.ok
+      ? { sent: true, reason: `sent (${result.deliveryStatus})` }
+      : { sent: false, reason: result.error ?? 'gmail send failed' }
+  } catch (err) {
+    return { sent: false, reason: `gmail failed: ${err instanceof Error ? err.message : 'unknown'}` }
+  }
+}
+
 /**
- * Continuation after a human approves a HIGH-risk patch: applies the SAME
- * candidate (checkpoint → validate → rollback) and resolves/rolls back.
+ * Continuation after a human approves a MEDIUM/HIGH-risk patch: applies the
+ * SAME candidate (checkpoint → validate → rollback) and resolves/rolls back.
  */
 export async function continueApprovedRepair(
   approvalId: string,
@@ -523,6 +579,7 @@ export async function continueApprovedRepair(
       roundsUsed: 0,
       rollback: false,
       telegram: { sent: false, reason: 'no approved patch to apply' },
+      gmail: { sent: false, reason: 'no approved patch to apply' },
     }
   }
   const incident = approval.incident
@@ -541,6 +598,7 @@ export async function continueApprovedRepair(
       roundsUsed: 0,
       rollback: false,
       telegram: { sent: false, reason: 'attempt missing' },
+      gmail: { sent: false, reason: 'attempt missing' },
     }
   }
 
@@ -559,6 +617,7 @@ export async function continueApprovedRepair(
       roundsUsed: 0,
       rollback: false,
       telegram: { sent: false, reason: 'no candidate stored' },
+      gmail: { sent: false, reason: 'no candidate stored' },
     }
   }
 
@@ -593,7 +652,10 @@ export async function continueApprovedRepair(
     })
     await updateAttemptStatus(attempt.id, 'RESOLVED', { risk, summary: `RESOLVED: ${candidate.diagnosis}`, completedAt: new Date(), patchState: { patchId: decision.record.patchId } })
     await consumeApproval(approval.approvalId)
-    const telegramAdjusted = await notifyTerminal(incident)
+    // Human-approved repairs record learning with the APPROVED decision so
+    // reward shaping (+approval) and the RL dataset stay honest.
+    await persistLearning(incident, attempt, candidate, risk, 'RESOLVED', await collectEvidence(incident), 'human-approved repair validated', 'APPROVED')
+    const terminalApproved = await notifyTerminal(incident)
     return {
       ok: true,
       incidentRef: incident.ref,
@@ -606,7 +668,8 @@ export async function continueApprovedRepair(
       conversationStop: 'approved-apply',
       roundsUsed: 0,
       rollback: false,
-      telegram: { sent: telegramAdjusted.sent, reason: telegramAdjusted.reason },
+      telegram: terminalApproved.telegram,
+      gmail: terminalApproved.gmail,
     }
   }
 
@@ -616,7 +679,8 @@ export async function continueApprovedRepair(
   })
   await updateAttemptStatus(attempt.id, 'ROLLED_BACK', { risk, summary: `ROLLED_BACK: ${decision.reason}`, completedAt: new Date(), patchState: { patchId: decision.record.patchId, reason: decision.reason } })
   await consumeApproval(approval.approvalId)
-  const telegramAdjusted = await notifyTerminal(incident)
+  await persistLearning(incident, attempt, candidate, risk, 'ROLLED_BACK', await collectEvidence(incident), decision.reason, 'APPROVED')
+  const terminalRolledBack = await notifyTerminal(incident)
   return {
     ok: false,
     incidentRef: incident.ref,
@@ -629,7 +693,8 @@ export async function continueApprovedRepair(
     conversationStop: 'approved-apply-rollback',
     roundsUsed: 0,
     rollback: true,
-    telegram: telegramAdjusted,
+    telegram: terminalRolledBack.telegram,
+    gmail: terminalRolledBack.gmail,
   }
 }
 
@@ -640,6 +705,91 @@ function decisionLabelFor(risk: PatchRisk, outcome: string): string {
   if (outcome === 'RESOLVED') return 'AUTO_REPAIR'
   if (outcome === 'ROLLED_BACK' || outcome === 'AI_REPAIR_FAILED') return 'RETRY_ANALYSIS'
   return 'REJECT_REPAIR'
+}
+
+/**
+ * Shared human-rejection finalizer (one-click email + dashboard PROCEED/REJECT
+ * flows converge here): marks the approval REJECTED, freezes the incident
+ * honestly with NO code change, records REJECTED learning (reward 0 — a
+ * rejection is information, never a coding success), and notifies both
+ * channels once. Idempotent: a non-PENDING approval returns its current state
+ * without re-executing anything.
+ */
+export async function finalizeRejectedRepair(
+  approvalId: string,
+  operatorLabel: string,
+): Promise<{ ok: boolean; status: string; incidentRef: string | null; telegram: ChannelResult; gmail: ChannelResult }> {
+  const existing = await prisma.approval.findUnique({
+    where: { approvalId },
+    include: { incident: true },
+  })
+  if (!existing) return { ok: false, status: 'NOT_FOUND', incidentRef: null, telegram: { sent: false, reason: 'approval not found' }, gmail: { sent: false, reason: 'approval not found' } }
+  if (existing.status !== 'PENDING') {
+    return { ok: true, status: existing.status, incidentRef: existing.incident.ref, telegram: { sent: false, reason: `already ${existing.status}` }, gmail: { sent: false, reason: `already ${existing.status}` } }
+  }
+  const rejected = await rejectApproval(approvalId)
+  if (!rejected) {
+    return { ok: false, status: 'PENDING', incidentRef: existing.incident.ref, telegram: { sent: false, reason: 'rejection failed' }, gmail: { sent: false, reason: 'rejection failed' } }
+  }
+  const riskWord = existing.incident.severity === 'HIGH' ? 'HIGH-risk' : existing.incident.severity === 'MEDIUM' ? 'MEDIUM-risk' : 'repair'
+  const attempt = await prisma.repairAttempt.findFirst({
+    where: { id: existing.repairAttemptId ?? undefined },
+  })
+  await prisma.incident.update({
+    where: { id: existing.incidentId },
+    data: {
+      status: 'AI_REPAIR_FAILED',
+      summary: `${riskWord} repair rejected by ${operatorLabel} (${approvalId}) — no code changed.`,
+    },
+  })
+  await prisma.repairAttempt.updateMany({
+    where: { incidentId: existing.incidentId, status: 'WAITING_APPROVAL' },
+    data: {
+      status: 'REJECTED',
+      summary: `${riskWord} repair rejected by ${operatorLabel} (${approvalId})`,
+      completedAt: new Date(),
+    },
+  })
+  await addIncidentEvent(existing.incidentId, 'REJECTED', `${riskWord} repair rejected by ${operatorLabel}`, `approval ${approvalId}`)
+  try {
+    await recordRepairMemory({
+      incident: existing.incident,
+      rootCause: existing.incident.expectedRootCause ?? 'human rejected the proposed repair',
+      file: null,
+      feature: existing.incident.endpoint.split('/').filter(Boolean).slice(0, 2).join('/') || null,
+      endpoint: existing.incident.endpoint,
+      patchSummary: `no patch applied (rejected ${approvalId})`,
+      risk: attempt?.risk ?? null,
+      outcome: 'REJECTED',
+      humanDecision: 'REJECTED',
+      humanReason: `rejected by ${operatorLabel}`,
+    })
+    const memory = await prisma.repairMemory.findUnique({ where: { incidentId: existing.incidentId } })
+    await recordRepairExperience({
+      incident: existing.incident,
+      memoryId: memory?.id ?? null,
+      attemptId: existing.repairAttemptId,
+      state: { incidentRef: existing.incident.ref, severity: existing.incident.severity, endpoint: existing.incident.endpoint, risk: attempt?.risk ?? null },
+      action: { decision: 'REJECT_REPAIR', humanDecision: 'REJECTED' },
+      nextState: { incidentStatus: 'AI_REPAIR_FAILED' },
+      terminal: true,
+      outcome: 'REJECTED',
+      humanDecision: 'REJECTED',
+    })
+    await recordHumanFeedback({ incidentId: existing.incidentId, decision: 'REJECTED', reason: `rejected by ${operatorLabel} (${approvalId})` })
+  } catch (err) {
+    await logger.warn({
+      service: 'learning',
+      message: `Rejection learning record failed: ${err instanceof Error ? err.message : 'unknown'}`,
+      route: existing.incident.endpoint,
+      method: existing.incident.method,
+      status: 500,
+      incidentId: existing.incidentId,
+    })
+  }
+  const refreshed = (await prisma.incident.findUnique({ where: { id: existing.incidentId } })) ?? existing.incident
+  const terminal = await notifyTerminal(refreshed)
+  return { ok: true, status: 'REJECTED', incidentRef: existing.incident.ref, telegram: terminal.telegram, gmail: terminal.gmail }
 }
 
 /** Pulls the accepted candidate back out of the attempt's last CODER AgentRun. */

@@ -16,7 +16,7 @@ import { addIncidentEvent } from './events'
 import { enqueueAutoRepair } from './auto-trigger'
 import { sendIncidentAlert } from '@/lib/server/notifications/summary'
 import { logger } from '@/lib/server/logger'
-import { FAULT_REGISTRY, type FaultConfig } from '@/lib/server/fault-injection'
+import { FAULT_REGISTRY, triggerTemplateMatches, isFaultActive, type FaultConfig } from '@/lib/server/fault-injection'
 import { SEVERITY_RISK_WEIGHTS, SEVERITY_CYBER_IMPACT } from '@/lib/server/observability'
 import type { Incident, IncidentSeverity } from '@prisma/client'
 
@@ -39,12 +39,20 @@ function faultFor(
   const idMatch = msg.match(/\b((?:LOW|MEDIUM|HIGH)-\d{1,2})\b/)
   if (idMatch) {
     const fault = FAULT_REGISTRY[idMatch[1]]
-    if (fault?.wired) return fault
+    // The registry tier describes the CONTROLLED fault (runtime guard
+    // engaged). When the guard is inactive the same message means genuine
+    // source-level breakage on that surface — do NOT borrow the fault's tier;
+    // fall through to the structural mapping (e.g. POST write path → MEDIUM)
+    // so a corrupted source file always requires human-approved repair.
+    if (fault?.wired && isFaultActive(fault.id)) return fault
+    if (fault?.wired) return null
   }
-  const target = `${(method ?? 'ANY').toUpperCase()} ${(route ?? '').split('?')[0]}`
+  const verb = (method ?? 'ANY').toUpperCase()
+  const target = `${verb} ${(route ?? '').split('?')[0]}`
   for (const fault of Object.values(FAULT_REGISTRY)) {
     if (!fault.wired || !fault.thrownMessage) continue
-    if (`${fault.trigger.method.toUpperCase()} ${fault.trigger.endpoint}` !== target) continue
+    if (fault.trigger.method.toUpperCase() !== verb) continue
+    if (`${fault.trigger.method.toUpperCase()} ${fault.trigger.endpoint}` !== target && !triggerTemplateMatches(fault.trigger.endpoint, route)) continue
     if (msg.includes(fault.thrownMessage)) return fault
   }
   return null

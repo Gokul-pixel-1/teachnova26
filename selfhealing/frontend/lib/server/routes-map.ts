@@ -33,6 +33,9 @@ const FALLBACK = 'unresolved — no source file hint available for this route'
 
 export function suspectSourceFor(route: string | null | undefined): string {
   if (!route) return 'unresolved — no route captured for this request'
+  // Concrete comment routes (/api/posts/<id>/comments) belong to the
+  // comments handler, not the generic post-detail prefix below.
+  if (route.split('?')[0].endsWith('/comments')) return 'app/api/posts/[id]/comments/route.ts'
   // Longest prefix wins so `/api/posts/[id]` matches before `/api/posts`.
   const hits = ROUTE_SOURCE_MAP.filter(([prefix]) => route.startsWith(prefix))
   if (hits.length === 0) return FALLBACK

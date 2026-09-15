@@ -199,12 +199,15 @@ enum DeliveryStatus {
   SKIPPED_DUPLICATE
 }
 
-// — Phase 8 — telegram subject type.
+// — Phase 8 — telegram subject type (shared by the Gmail channel: both
+// notification services persist lifecycle rows against these types).
 enum NotificationType {
   INCIDENT
   ESCALATION
   TEST
   HIGH_RISK_APPROVAL_REQUIRED
+  // MEDIUM-risk approval request (MEDIUM repairs require human approval).
+  MEDIUM_RISK_APPROVAL_REQUIRED
   REPAIR_APPLIED
   REPAIR_FAILED
   ROLLBACK_COMPLETED
@@ -261,6 +264,30 @@ model TelegramNotification {
   @@map("telegram_notifications")
 }
 
+// Gmail notification delivery record — parallel channel to Telegram (Phase 12).
+// Same lifecycle types, same append-only + permanent-dedupe contract, owned by
+// lib/server/gmail.ts. Gmail never creates its own incident/repair state.
+model GmailNotification {
+  id             String           @id @default(cuid())
+  incidentId     String?
+  incident       Incident?        @relation(fields: [incidentId], references: [id], onDelete: SetNull)
+  type           NotificationType @default(INCIDENT)
+  severity       IncidentSeverity?
+  recipient      String
+  subject        String
+  message        String
+  deliveryStatus DeliveryStatus   @default(SENT)
+  gmailMessageId String?
+  error          String?
+  createdAt      DateTime         @default(now())
+  lastSentAt     DateTime?
+
+  @@index([incidentId, type])
+  @@index([incidentId])
+  @@index([deliveryStatus])
+  @@map("gmail_notifications")
+}
+
 model Incident {
   id                String           @id @default(cuid())
   // Deterministic, human-facing reference (INC-00021).
@@ -295,6 +322,7 @@ model Incident {
   repairMemory      RepairMemory?
   repairExperiences RepairExperience[]
   telegramNotifications TelegramNotification[]
+  gmailNotifications GmailNotification[]
 
   @@index([status])
   @@index([severity])
@@ -368,12 +396,32 @@ model Approval {
   statusUpdatedAt DateTime      @updatedAt
   repairAttemptId String?
   repairAttempt   RepairAttempt? @relation(fields: [repairAttemptId], references: [id], onDelete: SetNull)
+  tokens          ApprovalToken[]
 
   @@index([incidentId])
   @@index([approvalId])
   @@index([status])
   @@index([repairAttemptId])
   @@map("approvals")
+}
+
+// One-click email approval tokens (Phase 12). Each row authorizes exactly ONE
+// APPROVE or REJECT click for one Approval: the raw token is shown only inside
+// the Gmail approval email, only its SHA-256 hash is stored, and the row is
+// marked usedAt on first redemption. Expiry mirrors the parent Approval.
+model ApprovalToken {
+  id         String   @id @default(cuid())
+  approvalId String
+  approval   Approval @relation(fields: [approvalId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique
+  action     String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime @default(now())
+
+  @@index([approvalId])
+  @@index([expiresAt])
+  @@map("approval_tokens")
 }
 
 // Persistent structured log events (dev/demo architecture — a bounded staging
@@ -493,6 +541,9 @@ model RepairMemory {
   humanDecision   String?
   humanReason     String?
   reward          Int      @default(0)
+  // Transparent per-outcome breakdown backing `reward` (e.g.
+  // { successfulRepair: 50, humanApproval: 40 }). Rendered on the dashboard.
+  rewardBreakdown Json?
   recurrenceCount Int      @default(0)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -518,6 +569,8 @@ model RepairExperience {
   state       Json
   action      Json
   reward      Int             @default(0)
+  // Transparent per-outcome breakdown backing `reward` (mirrors RepairMemory).
+  rewardBreakdown Json?
   nextState   Json?
   terminal    Boolean         @default(false)
   outcome     String?

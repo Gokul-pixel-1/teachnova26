@@ -10,9 +10,10 @@ import 'server-only'
 //
 // Message budget per incident (flood control):
 //   INCIDENT                 → 1 brief (attack-aware)
-//   ESCALATION (LOW/MEDIUM)  → 1 repair-plan brief, or for attack incidents 1
-//                              AI-assessment brief
-//   HIGH_RISK_APPROVAL_REQUIRED → 1 (replaces the repair-plan for HIGH)
+//   ESCALATION (LOW)         → 1 auto-apply repair-plan brief, or for attack
+//                              incidents 1 AI-assessment brief
+//   HIGH_RISK_APPROVAL_REQUIRED   → 1 (replaces the repair-plan for HIGH)
+//   MEDIUM_RISK_APPROVAL_REQUIRED → 1 (replaces the repair-plan for MEDIUM)
 //   FINAL_SUMMARY            → 1 terminal summary
 // Concrete dedupe is enforced by the delivery layer (one SENT per
 // (incident, type)).
@@ -118,6 +119,13 @@ function tierEmoji(tier: string | null): string {
   return '⚫'
 }
 
+function tierWord(tier: string | null): string {
+  if (tier === 'HIGH') return 'high'
+  if (tier === 'MEDIUM') return 'medium'
+  if (tier === 'LOW') return 'low'
+  return 'elevated'
+}
+
 // ---------------------------------------------------------------------------
 // Attack telemetry (honest — never claims a defensive action that did not run)
 // ---------------------------------------------------------------------------
@@ -206,7 +214,7 @@ function riskPolicyLines(brief: IncidentBrief): string[] {
   if (brief.risk.reason) lines.push(`Why: ${fit(shield(brief.risk.reason), 260)}`)
   if (brief.incident.status === 'WAITING_APPROVAL' || brief.risk.requiresApproval) {
     lines.push('Action: human approval required — nothing auto-applied.')
-  } else if (tier === 'LOW' || tier === 'MEDIUM') {
+  } else if (tier === 'LOW') {
     lines.push('Action: auto-apply → validate → keep if PASS → rollback if FAIL.')
   }
   return lines
@@ -293,7 +301,7 @@ function briefing(brief: IncidentBrief, opts: BriefingOptions): string {
     const approval = brief.approval
     lines.push('')
     lines.push('⚠️ HUMAN ACTION REQUIRED')
-    if (brief.risk.reason) lines.push(`Why high risk: ${fit(shield(brief.risk.reason), 300)}`)
+    if (brief.risk.reason) lines.push(`Why ${tierWord(brief.risk.tier)} risk: ${fit(shield(brief.risk.reason), 300)}`)
     lines.push(`Approval: ${shield(approval.approvalId)}`)
     lines.push(`Expires: ${utcStamp(approval.expiresAt, 'n/a')} (5 minutes)`)
     lines.push('')
@@ -319,7 +327,8 @@ export async function buildIncidentAlertMessage(incident: Incident): Promise<str
   })
 }
 
-/** LOW/MEDIUM auto-repair plan (ESCALATION after analysis + risk classification). */
+/** LOW auto-repair plan (ESCALATION after analysis + risk classification). Only
+ *  LOW repairs auto-apply — MEDIUM/HIGH stop at WAITING_APPROVAL instead. */
 export async function buildRepairPlanMessage(incident: Incident): Promise<string> {
   const brief = await buildIncidentBrief(incident.id)
   const tier = brief?.risk.tier ?? null
@@ -327,7 +336,7 @@ export async function buildRepairPlanMessage(incident: Incident): Promise<string
     tier === 'HIGH'
       ? '🔴 BUILDHUB HIGH-RISK REPAIR — APPROVAL REQUIRED'
       : tier === 'MEDIUM'
-        ? '🟡 BUILDHUB MEDIUM-RISK REPAIR — AUTO-APPLY'
+        ? '🟡 BUILDHUB MEDIUM-RISK REPAIR — APPROVAL REQUIRED'
         : tier === 'LOW'
           ? '🟢 BUILDHUB LOW-RISK REPAIR — AUTO-APPLY'
           : '⚙️ BUILDHUB REPAIR PLAN'
@@ -346,17 +355,25 @@ export async function buildAttackAnalysisMessage(incident: Incident): Promise<st
   })
 }
 
-/** HIGH-risk repair approval request (HIGH_RISK_APPROVAL_REQUIRED). */
-export async function buildApprovalRequiredMessage(incident: Incident): Promise<string> {
+/** MEDIUM/HIGH-risk repair approval request. MEDIUM uses
+ *  MEDIUM_RISK_APPROVAL_REQUIRED, HIGH keeps HIGH_RISK_APPROVAL_REQUIRED. */
+export async function buildApprovalRequiredMessage(
+  incident: Incident,
+  risk: 'MEDIUM' | 'HIGH' = 'HIGH',
+): Promise<string> {
   const brief = await buildIncidentBrief(incident.id)
+  const header =
+    risk === 'MEDIUM'
+      ? '🟡 BUILDHUB MEDIUM-RISK REPAIR — APPROVAL REQUIRED'
+      : '🔴 BUILDHUB HIGH-RISK REPAIR — APPROVAL REQUIRED'
   if (!brief) {
     return [
-      '<b>🔴 BUILDHUB HIGH-RISK REPAIR — APPROVAL REQUIRED</b>',
+      `<b>${escapeTelegramText(header)}</b>`,
       `Incident: ${escapeTelegramText(incident.ref)}`,
     ].join('\n')
   }
   return briefing(brief, {
-    header: '🔴 BUILDHUB HIGH-RISK REPAIR — APPROVAL REQUIRED',
+    header,
     heading1: '🔴 PROBLEM',
     showApprovalActions: true,
   })
@@ -585,7 +602,8 @@ export async function sendIncidentAlert(incident: Incident): Promise<SendTelegra
   })
 }
 
-/** Sends the auto-repair plan (ESCALATION) for a LOW/MEDIUM incident. */
+/** Sends the auto-repair plan (ESCALATION) for a LOW incident (the only tier
+ *  that auto-applies). */
 export async function sendRepairPlanMessage(incident: Incident): Promise<SendTelegramResult> {
   return sendTelegram({
     type: 'ESCALATION',

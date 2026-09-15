@@ -227,7 +227,7 @@ def run_crash_cycle(op, fault_id, trigger, expect_trigger, verifier, pre_open):
           run.get("stage") in ("WAITING_APPROVAL", "RESOLVED", "ROLLED_BACK"),
           f"stage={run.get('stage')}")
     if run.get("stage") == "WAITING_APPROVAL":
-        check(f"{fault_id} HIGH risk requires a human decision",
+        check(f"{fault_id} {run.get('risk') or 'elevated'} risk requires a human decision",
               run.get("requiresApproval") is True and bool(run.get("approvalId")),
               json.dumps(run))
         _, proceed = op.post("/api/approvals/proceed",
@@ -345,7 +345,7 @@ def main():
     faults_status, faults = op.get("/api/faults")
     check("GET /api/faults → 200 + enabled",
           faults_status == 200 and faults.get("enabled") is True, f"status={faults_status}")
-    check("9 faults registered", faults.get("total") == 9, f"got {faults.get('total')}")
+    check("10 faults registered", faults.get("total") == 10, f"got {faults.get('total')}")
     ids = [f.get("id") for f in faults.get("faults", [])]
     for fid in ALL_FAULTS:
         check(f"Fault registry has {fid}", fid in ids, "not found")

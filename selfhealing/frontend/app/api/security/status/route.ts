@@ -13,6 +13,7 @@ import { securityOperators, isSecurityOperator } from '@/lib/server/security'
 import { offeredModels, configuredModel } from '@/lib/server/ai'
 import { aiProviderName, providerModeLabel } from '@/lib/server/provider'
 import { telegramConfig, checkTelegramConnectivity } from '@/lib/server/telegram'
+import { gmailConfig } from '@/lib/server/gmail'
 
 // Phase 8 — live security status for the command center. Any authenticated user
 // may read it; write/trigger actions are separated onto the operator-gated
@@ -87,6 +88,27 @@ export async function GET(request: Request) {
     const lastIncident = await prisma.incident.findFirst({
       orderBy: { createdAt: 'desc' },
       select: { ref: true, status: true, severity: true, createdAt: true, telegramNotifications: { orderBy: { createdAt: 'desc' }, take: 3, select: { type: true, deliveryStatus: true, createdAt: true } } },
+    })
+
+    const gmail = gmailConfig()
+    const gmailRecents = await prisma.gmailNotification.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 5,
+      select: {
+        id: true,
+        type: true,
+        severity: true,
+        subject: true,
+        deliveryStatus: true,
+        gmailMessageId: true,
+        error: true,
+        createdAt: true,
+        incidentId: true,
+      },
+    })
+    const gmailLast = await prisma.gmailNotification.findFirst({
+      orderBy: { createdAt: 'desc' },
+      select: { type: true, deliveryStatus: true, gmailMessageId: true, error: true, createdAt: true },
     })
 
     const agentStats = Object.fromEntries(
@@ -193,6 +215,31 @@ export async function GET(request: Request) {
           severity: row.severity,
           deliveryStatus: row.deliveryStatus,
           telegramMessageId: row.telegramMessageId,
+          error: row.error,
+          incidentId: row.incidentId,
+          createdAt: row.createdAt.toISOString(),
+        })),
+      },
+      gmail: {
+        configured: gmail.configured,
+        missing: gmail.missing,
+        recipient: gmail.recipient,
+        lastDelivery: gmailLast
+          ? {
+              type: gmailLast.type,
+              deliveryStatus: gmailLast.deliveryStatus,
+              gmailMessageId: gmailLast.gmailMessageId,
+              error: gmailLast.error,
+              createdAt: gmailLast.createdAt.toISOString(),
+            }
+          : null,
+        recent: gmailRecents.map((row) => ({
+          id: row.id,
+          type: row.type,
+          severity: row.severity,
+          subject: row.subject,
+          deliveryStatus: row.deliveryStatus,
+          gmailMessageId: row.gmailMessageId,
           error: row.error,
           incidentId: row.incidentId,
           createdAt: row.createdAt.toISOString(),

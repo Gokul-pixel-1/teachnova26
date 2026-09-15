@@ -119,12 +119,42 @@ export function centerSourceWindow(sourceContext: string | null, maxChars: numbe
 }
 
 export function renderMemoryHints(
-  memoryHints: { rootCause: string; patchSummary: string; outcome: string }[],
+  memoryHints: {
+    rootCause: string
+    patchSummary: string
+    outcome: string
+    reward?: number
+    recurrenceCount?: number
+    humanDecision?: string | null
+    signatureMatch?: boolean
+  }[],
   max = MAX_MEMORY_HINTS,
 ): string[] {
   return memoryHints.slice(0, max).map((m) => {
     const rc = truncate(m.rootCause, MAX_MEMORY_HINT)
     const ps = truncate(m.patchSummary, MAX_MEMORY_HINT)
-    return `- ${m.outcome}: ${rc} -> ${ps}`
+    const meta: string[] = []
+    if (typeof m.reward === 'number') meta.push(`reward ${m.reward >= 0 ? '+' : ''}${m.reward}`)
+    if ((m.recurrenceCount ?? 0) > 0) meta.push(`error returned ${m.recurrenceCount}× after this`)
+    if (m.humanDecision) meta.push(`human ${m.humanDecision}`)
+    if (m.signatureMatch) meta.push('same error signature')
+    const head = `- ${m.outcome}${meta.length ? ` (${meta.join(', ')})` : ''}: ${rc} -> ${ps}`
+    // Failed strategies must be named honestly so the agent reasons from
+    // evidence, not slogans. ROLLED_BACK means a patch was actually applied
+    // and then failed real validation — a strong do-not-repeat signal.
+    // AI_REPAIR_FAILED means the attempt ended BEFORE any patch was validated
+    // (rejected in review, or failed early) — it is NOT evidence that the
+    // strategy fails validation, so it must not be cited as such; evaluate
+    // current evidence independently. Regressed "successes" are suspect.
+    if (m.outcome === 'ROLLED_BACK') {
+      return `${head}\n  WARNING: this prior strategy was applied and FAILED real validation (rollback followed) — do NOT repeat it; inspect the current source and propose a different fix.`
+    }
+    if (m.outcome === 'AI_REPAIR_FAILED') {
+      return `${head}\n  NOTE: this prior attempt ended before any patch was validated (rejected in review or failed early) — this is NOT evidence the strategy fails; evaluate the current evidence independently.`
+    }
+    if ((m.recurrenceCount ?? 0) > 0) {
+      return `${head}\n  WARNING: this fix was marked resolved but the same error returned — treat the old patch as suspect and verify the current failure independently.`
+    }
+    return head
   })
 }

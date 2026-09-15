@@ -34,6 +34,8 @@ export async function GET() {
         risk: m.risk,
         outcome: m.outcome,
         reward: m.reward,
+        rewardBreakdown: (m.rewardBreakdown ?? null) as Record<string, number> | null,
+        recurrenceCount: m.recurrenceCount,
         humanDecision: m.humanDecision,
         humanReason: m.humanReason,
         createdAt: m.createdAt.toISOString(),

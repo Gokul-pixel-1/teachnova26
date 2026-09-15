@@ -398,7 +398,7 @@ export function SecurityClient() {
 
         {/* AI + conduit status */}
         <Card>
-          <CardHeader icon="sparkles" title="AI + Alerting" hint="provider-bound · Telegram" />
+          <CardHeader icon="sparkles" title="AI + Alerting" hint="provider-bound · Telegram + Gmail" />
           <div className="space-y-3 px-4 py-4 text-xs">
             <div className="flex items-start gap-2">
               <Icon
@@ -483,6 +483,32 @@ export function SecurityClient() {
                 </div>
               </div>
             )}
+            <div className="flex items-start gap-2">
+              <Icon
+                name="mail"
+                size={14}
+                className={cn(
+                  'mt-0.5 shrink-0',
+                  data.gmail.configured ? 'text-bh-success' : 'text-bh-danger',
+                )}
+              />
+              <div className="min-w-0 flex-1">
+                <p className="font-medium text-bh-ink">Gmail</p>
+                <p className="truncate text-bh-faint">
+                  {!data.gmail.configured
+                    ? `GMAIL NOT CONFIGURED (missing ${data.gmail.missing.join(', ') || 'credentials'})`
+                    : `configured → ${data.gmail.recipient ?? 'operator inbox'}`}
+                </p>
+                {data.gmail.lastDelivery && (
+                  <p className="mt-0.5 truncate font-mono text-[10px] text-bh-faint">
+                    last {data.gmail.lastDelivery.type} · {data.gmail.lastDelivery.deliveryStatus}
+                    {data.gmail.lastDelivery.deliveryStatus === 'FAILED' && data.gmail.lastDelivery.error
+                      ? ` — ${data.gmail.lastDelivery.error.slice(0, 120)}`
+                      : ''}
+                  </p>
+                )}
+              </div>
+            </div>
             {data.agents.COMPLETE !== undefined && (
               <div className="flex items-start gap-2">
                 <Icon name="gitBranch" size={14} className="mt-0.5 shrink-0 text-bh-accent-ink" />

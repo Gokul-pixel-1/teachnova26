@@ -132,6 +132,29 @@ export interface SecurityStatusDTO {
     } | null
     recent: SecurityTelegramDTO[]
   }
+  gmail: {
+    configured: boolean
+    missing: string[]
+    recipient: string | null
+    lastDelivery: {
+      type: NotificationType
+      deliveryStatus: DeliveryStatus
+      gmailMessageId: string | null
+      error: string | null
+      createdAt: string
+    } | null
+    recent: Array<{
+      id: string
+      type: NotificationType
+      severity: IncidentSeverity | null
+      subject: string
+      deliveryStatus: DeliveryStatus
+      gmailMessageId: string | null
+      error: string | null
+      incidentId: string | null
+      createdAt: string
+    }>
+  }
 }
 
 export interface AgentPipelineRunResult {
@@ -140,6 +163,7 @@ export interface AgentPipelineRunResult {
   runs: Array<{ agent: string; status: string; summary?: string; error?: string }>
   aiUnavailable: boolean
   telegram: { sent: boolean; reason: string }
+  gmail: { sent: boolean; reason: string }
 }
 
 export interface TelegramTestResult {

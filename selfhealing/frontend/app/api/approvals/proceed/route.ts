@@ -2,10 +2,11 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 
 import { requireSecurityOperator } from '@/lib/server/security'
-import { approveApproval, rejectApproval, expireApproval, isExpired, getPendingApproval } from '@/lib/server/approval'
-import { continueApprovedRepair } from '@/lib/server/repair/engine'
+import { approveApproval, expireApproval, isExpired, getPendingApproval } from '@/lib/server/approval'
+import { continueApprovedRepair, finalizeRejectedRepair } from '@/lib/server/repair/engine'
 import { addIncidentEvent } from '@/lib/server/repair/events'
 import { sendIncidentTerminalSummary } from '@/lib/server/notifications/summary'
+import { sendFinalEmail } from '@/lib/server/gmail'
 import { prisma } from '@/lib/server/db'
 import { logger, resolveRequestId } from '@/lib/server/logger'
 import { errorResponse, handleApiError, firstZodIssue } from '@/lib/server/response'
@@ -103,6 +104,7 @@ export async function POST(request: Request) {
           })
           await addIncidentEvent(expiredRow.incidentId, 'EXPIRED', 'Approval expired without decision', approvalId)
           await sendIncidentTerminalSummary(expiredRow.incident).catch(() => undefined)
+          await sendFinalEmail({ incident: expiredRow.incident }).catch(() => undefined)
         }
         return NextResponse.json({
           expired: true,
@@ -141,40 +143,15 @@ export async function POST(request: Request) {
         }
       }
     } else if (action === 'reject') {
-      const rejected = await rejectApproval(approvalId)
-      if (!rejected) {
+      // A human rejected the repair: shared finalizer freezes the incident
+      // honestly (no code change), records REJECTED learning, and notifies
+      // both channels once. Idempotent on repeat clicks.
+      const finalized = await finalizeRejectedRepair(approvalId, 'security-operator')
+      if (!finalized.ok) {
         return errorResponse('Failed to process rejection.', 500)
       }
-      // A human rejected the HIGH-risk repair: finalize the incident honestly
-      // (no code change) and send the one-and-only REJECTED terminal summary.
-      const rejectedIncident = await prisma.incident.findUnique({
-        where: { id: rejected.incidentId },
-      })
-      if (rejectedIncident) {
-        await prisma.incident.update({
-          where: { id: rejectedIncident.id },
-          data: {
-            status: 'AI_REPAIR_FAILED',
-            summary: `HIGH-risk repair rejected by operator (${approvalId}).`,
-          },
-        })
-        await prisma.repairAttempt.updateMany({
-          where: { incidentId: rejectedIncident.id, status: 'WAITING_APPROVAL' },
-          data: {
-            status: 'REJECTED',
-            summary: `HIGH-risk repair rejected by operator (${approvalId})`,
-            completedAt: new Date(),
-          },
-        })
-        await addIncidentEvent(
-          rejectedIncident.id,
-          'REJECTED',
-          'HIGH-risk repair rejected by operator',
-          `approval ${approvalId}`,
-        )
-        await sendIncidentTerminalSummary(rejectedIncident).catch(() => undefined)
-      }
-      result = { approval: rejected, success: true }
+      const rejected = await prisma.approval.findUnique({ where: { approvalId } })
+      result = { approval: rejected as unknown as Approval, success: true }
     }
 
     await logger.info({

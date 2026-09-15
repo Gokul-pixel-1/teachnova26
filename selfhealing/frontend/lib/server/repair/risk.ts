@@ -7,10 +7,12 @@ import 'server-only'
 //
 //   HIGH   — authentication, authorization, infrastructure/cascading,
 //            destructive verbs, or a HIGH/CRITICAL incident
-//   MEDIUM — the fix touches shared business/schema logic (lib/server) or DB
-//            schema/codegen that other endpoints depend on
-//   LOW    — isolated, non-security, route-local single-surface fix (e.g. a
-//            broken field inside one route file)
+//   MEDIUM — a MEDIUM incident (user-visible shared surface, e.g. the Post
+//            button fault), or a fix touching shared business/schema logic
+//            (lib/server) or DB schema/codegen that other endpoints depend on.
+//            MEDIUM repairs require human approval before PATCH.
+//   LOW    — LOW incident with an isolated, non-security, route-local
+//            single-surface fix. LOW repairs apply automatically.
 
 import type { Incident } from '@prisma/client'
 
@@ -69,10 +71,13 @@ export function classifyPatchRisk(
     }
   }
 
-  if (sharedBusinessSurface(proposedFile)) {
+  if (sharedBusinessSurface(proposedFile) || incident.severity === 'MEDIUM') {
     return {
       risk: 'MEDIUM',
-      reason: `shared business/schema surface: ${proposedFile}`,
+      reason:
+        incident.severity === 'MEDIUM'
+          ? `MEDIUM incident on a user-visible surface — human approval required before PATCH: ${proposedFile} · ${incident.method} ${incident.endpoint}`
+          : `shared business/schema surface: ${proposedFile}`,
     }
   }
 

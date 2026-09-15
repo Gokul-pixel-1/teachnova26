@@ -53,7 +53,16 @@ export interface RepairEvidence {
   stackTrace: string | null
   sourceContext: string | null
   architectureDoc: string | null
-  memoryHints: { rootCause: string; patchSummary: string; outcome: string }[]
+  memoryHints: {
+    rootCause: string
+    patchSummary: string
+    outcome: string
+    reward: number
+    recurrenceCount: number
+    humanDecision: string | null
+    /** True when the prior incident shares the current error signature. */
+    signatureMatch: boolean
+  }[]
 }
 
 export interface CoderOutput {

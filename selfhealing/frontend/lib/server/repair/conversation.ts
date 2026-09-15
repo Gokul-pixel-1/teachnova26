@@ -59,6 +59,7 @@ import type {
 } from '@/lib/server/providers/types'
 import type { Incident, RepairAttempt } from '@prisma/client'
 import { Prisma } from '@prisma/client'
+import { FAULT_REGISTRY, isFaultActive } from '@/lib/server/fault-injection'
 
 export const MAX_CODER_ROUNDS = 2
 
@@ -191,6 +192,15 @@ function evidenceHeaderFor(evidence: RepairEvidence, role: HeaderRole, level: He
   if (role === 'CRITIC') {
     const source = focusedSourceWindow(evidence.sourceContext, caps.source, errorNeedles(evidence))
     if (source) lines.push(``, `## Current source (environment view)`, source)
+    // The Critic judges against history too: prior failures/regressions for
+    // this signature must weigh against the proposal.
+    if (caps.memory > 0 && evidence.memoryHints.length > 0) {
+      lines.push(
+        ``,
+        `## Repair memory (outcomes from earlier incidents)`,
+        ...renderMemoryHints(evidence.memoryHints, Math.min(caps.memory, 2)),
+      )
+    }
   }
   return lines.join('\n')
 }
@@ -223,6 +233,7 @@ function transcriptBlock(coder: CoderOutput, critic: CriticOutput | null, level:
   const lines = [
     `--- Proposal (Coder) ---`,
     `file: ${coder.file}${coder.line ? `:${coder.line}` : ''}`,
+    `runtimeRepair: ${coder.runtimeRepair ?? 'null (ordinary source patch)'}`,
     `CURRENT (faulty):\n${truncate(coder.currentCode, codeCap)}`,
     ``,
     `PROPOSED (fix):\n${truncate(coder.proposedCode, codeCap)}`,
@@ -246,6 +257,7 @@ function candidateDiff(coder: CoderOutput, level: HeaderLevel = 0): string {
   const codeCap = level === 0 ? 1500 : level === 1 ? 1000 : 600
   return [
     `file: ${coder.file}${coder.line ? `:${coder.line}` : ''}`,
+    `runtimeRepair: ${coder.runtimeRepair ?? 'null (ordinary source patch)'}`,
     `CURRENT (faulty):`,
     truncate(coder.currentCode, codeCap),
     ``,
@@ -441,8 +453,19 @@ async function callAndStore(
       }
     }
   }
+  // One bounded retry on provider rate limiting (Groq on_demand tiers reject
+  // bursts with 429): wait, retry once, trace both attempts. Anything else
+  // fails fast — no retry loops, no new incidents.
+  const callWithRateLimitRetry = async (msgs: ChatMessage[], roleLabel: string): Promise<ProviderResponse> => {
+    const first = await safeCall(msgs)
+    const limited = !first.ok && /rate limit|429|rate_limit|too many requests/i.test(first.error ?? '')
+    if (!limited) return first
+    traceCall(role, `${roleLabel} rate-limited — waiting 25s for one retry`, incident.id, evidence.incidentRef, evidence.endpoint, evidence.method)
+    await new Promise((r) => setTimeout(r, 25_000))
+    return safeCall(msgs)
+  }
 
-  let response = await safeCall(messages)
+  let response = await callWithRateLimitRetry(messages, `round ${round}`)
   let compacted: { from: number; to: number; level: HeaderLevel } | null = null
   if (!response.ok && isContextSizeFailure(response.error) && level < 2) {
     const fromTokens = estimateMessagesTokens(messages)
@@ -530,6 +553,55 @@ async function callAndStore(
 // Conversation runner
 // ---------------------------------------------------------------------------
 
+/**
+ * Deterministic no-op → restore bridge (provider-independent).
+ *
+ * A Coder that proposes byte-identical CURRENT/PROPOSED code is stating that
+ * the source needs no change. When a WIRED runtime fault is simultaneously
+ * active for the incident's exact endpoint+method, the only coherent repair
+ * action is restoring normal runtime behavior — so the empty proposal is
+ * normalized to an explicit `runtimeRepair: 'restore'` directive BEFORE the
+ * Critic reviews it. The Critic (prompt-disciplined to verify the guard) and
+ * the Judge still decide; real HTTP validation probes remain the backstop, so
+ * a wrong restore can only end in honest ROLLBACK, never false RESOLVED.
+ * The enriched output is re-persisted so the DB transcript matches the engine.
+ */
+async function enrichNoopRestoreDirective(
+  coder: CoderOutput,
+  agentRunId: string,
+  incident: Incident,
+  evidence: RepairEvidence,
+): Promise<boolean> {
+  if (coder.runtimeRepair) return false
+  const normalize = (s: string): string => s.replace(/\s+/g, ' ').trim()
+  const proposed = (coder.proposedCode ?? '').trim()
+  const current = (coder.currentCode ?? '').trim()
+  if (!proposed || !current || normalize(proposed) !== normalize(current)) return false
+  const method = (evidence.method ?? '').toUpperCase()
+  const activeFault = Object.values(FAULT_REGISTRY).find(
+    (f) => f.wired && f.trigger.method.toUpperCase() === method && f.trigger.endpoint === evidence.endpoint && isFaultActive(f.id),
+  )
+  if (!activeFault) return false
+  coder.runtimeRepair = 'restore'
+  await prisma.agentRun.update({
+    where: { id: agentRunId },
+    data: { output: coder as unknown as Prisma.InputJsonValue },
+  })
+  trace('AGENT-2 CODER', `no-op proposal + active wired fault ${activeFault.id} → deterministic runtime-restore directive`, {
+    incidentRef: incident.ref,
+    incidentId: incident.id,
+    route: evidence.endpoint,
+    method: evidence.method,
+  })
+  await addIncidentEvent(
+    incident.id,
+    'INVESTIGATING',
+    'No-op proposal normalized to runtime restore',
+    `wired fault ${activeFault.id} active for ${evidence.method} ${evidence.endpoint}; Critic reviews the restore directive`,
+  )
+  return true
+}
+
 export async function runRepairConversation(
   incident: Incident,
   attempt: RepairAttempt,
@@ -611,6 +683,7 @@ export async function runRepairConversation(
     }
     const coder = coderResult.output as CoderOutput
     coderOutputs.push(coder)
+    await enrichNoopRestoreDirective(coder, coderResult.agentRunId, incident, evidence)
     trace('AGENT-2 CODER', `round ${round} candidate: ${coder.file}${coder.line ? `:${coder.line}` : ''} · runtimeRepair=${coder.runtimeRepair ?? 'file-patch'}`, {
       incidentRef: incident.ref,
       incidentId: incident.id,

@@ -96,7 +96,7 @@ def main():
         check("Faults API returns 200", faults_resp.status == 200)
         faults_json = json.loads(faults_resp.body())
         check("Faults API returns JSON", "faults" in faults_json)
-        check("9 faults registered", faults_json.get("total") == 9 or len(faults_json.get("faults", [])) == 9)
+        check("10 faults registered", faults_json.get("total") == 10 or len(faults_json.get("faults", [])) == 10)
         
         fault_ids = [f["id"] for f in faults_json.get("faults", [])]
         expected_faults = ["LOW-01", "LOW-02", "LOW-03", "MEDIUM-01", "MEDIUM-02", "MEDIUM-03", "HIGH-01", "HIGH-02", "HIGH-03"]

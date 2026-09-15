@@ -138,6 +138,23 @@ export interface IncidentBrief {
   }
   location: { file: string | null; line: number | null; function: string | null } | null
   rootCause: string | null
+  /** Historical + detection-evidence context (all persisted, never invented). */
+  history: {
+    signature: string | null
+    httpStatus: number | null
+    occurrences: number
+    logExcerpt: string | null
+    previous: Array<{
+      ref: string
+      status: string
+      severity: string
+      rootCause: string | null
+      outcome: string | null
+      reward: number | null
+      humanDecision: string | null
+      createdAt: string
+    }>
+  } | null
   aiAnalysis: {
     rounds: Array<{ round: number; coder: CoderRound; critic: CriticRound }>
     judge: JudgeRound | null
@@ -369,6 +386,54 @@ export async function buildIncidentBrief(incidentId: string): Promise<IncidentBr
   const latestCoder = [...coderRuns].reverse().find((run) => run.status === 'COMPLETE') ?? null
   const latestCoderParsed = latestCoder?.output ? coderFromOutput(latestCoder.output) : null
 
+  // Historical + detection-evidence context for approval emails and the AI
+  // chat: same normalized error signature (or, failing that, same endpoint),
+  // excluding this incident. Previous repairs are CONTEXT ONLY — consumers
+  // must re-evaluate current evidence, never blindly reuse an old patch.
+  let history: IncidentBrief['history'] = null
+  try {
+    const meta = (incident.metadata ?? null) as { errorSignature?: unknown } | null
+    const signature = meta && typeof meta.errorSignature === 'string' && meta.errorSignature.trim()
+      ? meta.errorSignature.trim().slice(0, 200)
+      : null
+    const [logCount, firstErrorLog, previousRaw] = await Promise.all([
+      prisma.logEvent.count({ where: { incidentId: incident.id } }),
+      prisma.logEvent.findFirst({
+        where: { incidentId: incident.id, level: 'ERROR' },
+        orderBy: { createdAt: 'asc' },
+        select: { status: true, message: true },
+      }),
+      prisma.incident.findMany({
+        where: signature
+          ? { id: { not: incident.id }, metadata: { path: ['errorSignature'], equals: signature } }
+          : { id: { not: incident.id }, endpoint: incident.endpoint },
+        include: {
+          repairMemory: { select: { outcome: true, reward: true, humanDecision: true, rootCause: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+    ])
+    history = {
+      signature,
+      httpStatus: firstErrorLog?.status ?? null,
+      occurrences: logCount,
+      logExcerpt: firstErrorLog?.message?.slice(0, 500) ?? null,
+      previous: previousRaw.map((p) => ({
+        ref: p.ref,
+        status: p.status,
+        severity: p.severity,
+        rootCause: p.repairMemory?.rootCause ?? p.expectedRootCause ?? null,
+        outcome: p.repairMemory?.outcome ?? null,
+        reward: p.repairMemory?.reward ?? null,
+        humanDecision: p.repairMemory?.humanDecision ?? null,
+        createdAt: toIso(p.createdAt) ?? '',
+      })),
+    }
+  } catch {
+    history = null
+  }
+
   const riskTier = attempt?.risk ?? (patch?.risk ?? null)
 
   const brief: IncidentBrief = {
@@ -407,6 +472,7 @@ location:
           }
         : null,
     rootCause: latestCoderParsed?.rootCause ?? latestCoderParsed?.diagnosis ?? incident.expectedRootCause ?? null,
+    history,
     aiAnalysis: {
       rounds,
       judge,
@@ -423,7 +489,7 @@ location:
     risk: {
       tier: riskTier ?? judge?.risk ?? null,
       reason: attempt?.riskReason ?? null,
-      requiresApproval: patch?.requiresApproval ?? (riskTier === 'HIGH'),
+      requiresApproval: patch?.requiresApproval ?? (riskTier === 'HIGH' || riskTier === 'MEDIUM'),
     },
     approval: approval
       ? {
