@@ -1,435 +1,243 @@
 import 'server-only'
 
 import PDFDocument from 'pdfkit'
-import type {
-  AgentRunDTO,
-  IncidentDetailDTO,
-  LogEventDTO,
-  Overview,
-} from './observability'
+import type { IncidentDetailDTO, Overview } from './observability'
+import type { IncidentBrief } from './notifications/brief'
 
-// ---------------------------------------------------------------------------
-// Phase 8 — incident PDF report generation.
-//
-// Maintainable approach: `pdfkit` renders directly to a buffer; no HTML or
-// headless browser involved. The report only ever receives already-serialized
-// DTOs (never raw DB rows, never user input), so it can neither leak
-// credentials/session data nor be used to smuggle secrets into the document.
-// The AI pipeline section reflects REAL Groq-backed agent runs; failed runs
-// are surfaced as "AI ANALYSIS UNAVAILABLE" instead of simulating output.
-// ---------------------------------------------------------------------------
+const NAVY = '#102238'
+const BLUE = '#2563eb'
+const INK = '#172033'
+const MUTED = '#66758a'
+const LINE = '#d9e1ea'
+const PALE = '#f4f7fa'
+const GREEN = '#15803d'
+const AMBER = '#b45309'
+const RED = '#b91c1c'
+const LEFT = 48
+const RIGHT = 547
+const WIDTH = RIGHT - LEFT
+const BOTTOM = 770
 
-const ACCENT = '#ea580c'
-const INK = '#17171b'
-const MUTED = '#78787a'
-const LINE = '#d6d6db'
-const DANGER = '#dc2626'
-const SUCCESS = '#16a34a'
-const WARNING = '#d97706'
+export interface DeliveryInfo {
+  id: string
+  type: string
+  severity: string | null
+  deliveryStatus: string
+  externalMessageId: string | null
+  error: string | null
+  createdAt: string
+}
+
+export interface SecurityEvidenceInfo {
+  ruleId: string
+  title: string
+  detail: string | null
+  hitCount: number
+  firstSeenAt: string
+  lastSeenAt: string
+}
 
 export interface ReportInput {
   detail: IncidentDetailDTO
   overview: Overview
   generatedAt: string
-  alerts: TelegramAlertInfo[]
+  brief: IncidentBrief | null
+  telegram: DeliveryInfo[]
+  gmail: DeliveryInfo[]
+  securityEvidence: SecurityEvidenceInfo[]
 }
 
-export interface TelegramAlertInfo {
-  id: string
-  type: string
-  severity: string | null
-  deliveryStatus: string
-  telegramMessageId: string | null
-  error: string | null
-  createdAt: string
-}
-
-function levelColor(level: string): string {
-  const map: Record<string, string> = {
-    INFO: '#3b82f6',
-    WARN: WARNING,
-    ERROR: DANGER,
-    SECURITY: DANGER,
+function clean(value: unknown, fallback = 'Not recorded'): string {
+  if (typeof value === 'string') {
+    const text = value
+      .replace(/<[^>]+>/g, '')
+      .replace(/\b(?:LOW|MEDIUM|HIGH|COMMENT)-\d{1,2}\b\s*(?:INTENTIONAL\s+RUNTIME\s+ERROR|CREATED)?/gi, 'controlled incident')
+      .replace(/\b(?:intentional|demo)\s+(?:runtime\s+)?fault\b/gi, 'controlled incident')
+      .replace(/\bfault\s+fixture\b/gi, 'controlled incident')
+      .replace(/→/g, '->').replace(/←/g, '<-').replace(/[–—]/g, '-').replace(/·/g, ' | ')
+      .replace(/[✓✔✅]/g, 'PASS').replace(/[✗✕❌]/g, 'FAIL').replace(/[•●]/g, '-')
+      .normalize('NFKD').replace(/[^\x09\x0a\x0d\x20-\x7e]/g, '')
+      .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, '')
+      .trim()
+    return text || fallback
   }
-  return map[level] ?? MUTED
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  return fallback
 }
 
-function severityColor(severity: string): string {
-  const map: Record<string, string> = {
-    LOW: SUCCESS,
-    MEDIUM: WARNING,
-    HIGH: DANGER,
-    CRITICAL: DANGER,
-  }
-  return map[severity] ?? MUTED
+function timestamp(value: string | null | undefined): string {
+  if (!value) return 'Not recorded'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? clean(value) : date.toISOString().replace('T', ' ').replace('.000Z', ' UTC')
 }
 
-export function generateIncidentReport({
-  detail,
-  overview,
-  generatedAt,
-  alerts,
-}: ReportInput): Promise<Buffer> {
+function tone(value: string): string {
+  const text = value.toUpperCase()
+  if (/FAIL|REJECT|ROLLBACK|HIGH|CRITICAL/.test(text)) return RED
+  if (/WAIT|PENDING|MEDIUM|WARN/.test(text)) return AMBER
+  if (/PASS|SENT|RESOLVED|APPROVED|CONSUMED|LOW/.test(text)) return GREEN
+  return BLUE
+}
+
+export function generateIncidentReport(input: ReportInput): Promise<Buffer> {
   return new Promise((resolve, reject) => {
+    const { detail, overview, brief } = input
     const doc = new PDFDocument({
-      size: 'A4',
-      margin: 48,
-      bufferPages: true,
-      info: {
-        Title: `BuildHub Incident Report ${detail.ref}`,
-        Author: 'BuildHub Observability',
-        Subject: `${detail.title}`,
-        Creator: 'BuildHub Phase 8 — Security Command Center',
-      },
+      size: 'A4', margin: LEFT, bufferPages: true,
+      info: { Title: `BuildHub Incident Report ${detail.ref}`, Author: 'BuildHub Self-Healing Operations', Subject: detail.title, Creator: 'BuildHub Incident Reporting' },
     })
-
     const chunks: Buffer[] = []
-    doc.on('data', (c: Buffer) => chunks.push(c))
+    doc.on('data', (chunk: Buffer) => chunks.push(chunk))
     doc.on('end', () => resolve(Buffer.concat(chunks)))
     doc.on('error', reject)
 
-    // Helper: metadata row
-    const metaRow = (label: string, value: string) => {
-      doc.font('Helvetica-Bold').fontSize(8).fillColor(MUTED).text(label.toUpperCase(), 48, doc.y, {
-        continued: true,
-        width: 96,
-        lineBreak: false,
-      })
-      doc.font('Helvetica').fontSize(9).fillColor(INK).text(value)
+    const ensure = (height: number) => { if (doc.y + height > BOTTOM) doc.addPage() }
+    const rule = () => doc.moveTo(LEFT, doc.y).lineTo(RIGHT, doc.y).strokeColor(LINE).lineWidth(0.7).stroke()
+    const section = (title: string, subtitle?: string) => {
+      ensure(subtitle ? 58 : 43)
+      doc.moveDown(0.85).font('Helvetica-Bold').fontSize(12).fillColor(NAVY).text(title)
+      if (subtitle) doc.moveDown(0.12).font('Helvetica').fontSize(8).fillColor(MUTED).text(clean(subtitle))
+      doc.moveDown(0.35); rule(); doc.moveDown(0.55)
+    }
+    const paragraph = (value: unknown) => {
+      ensure(32); doc.font('Helvetica').fontSize(9).fillColor(INK).text(clean(value), { lineGap: 2 }); doc.moveDown(0.35)
+    }
+    const field = (label: string, value: unknown) => {
+      const raw = clean(value)
+      const safe = raw.length > 1800 ? `${raw.slice(0, 1797)}...` : raw
+      const height = Math.max(22, doc.heightOfString(safe, { width: 354, lineGap: 1 }) + 8)
+      ensure(height)
+      const y = doc.y
+      doc.font('Helvetica-Bold').fontSize(7.5).fillColor(MUTED).text(label.toUpperCase(), LEFT, y + 2, { width: 128 })
+      doc.font('Helvetica').fontSize(8.8).fillColor(INK).text(safe, LEFT + 138, y, { width: 361, lineGap: 1 })
+      doc.y = Math.max(doc.y, y + height)
+    }
+    const badge = (label: string, value: string) => {
+      ensure(26); const y = doc.y
+      doc.roundedRect(LEFT, y, WIDTH, 22, 4).fill(PALE)
+      doc.font('Helvetica-Bold').fontSize(8).fillColor(MUTED).text(label.toUpperCase(), LEFT + 9, y + 7, { width: 120 })
+      doc.fillColor(tone(value)).text(clean(value), LEFT + 138, y + 7, { width: 350 }); doc.y = y + 28
+    }
+    const code = (label: string, value: unknown) => {
+      section(label); ensure(55); const safe = clean(value)
+      const height = Math.min(215, Math.max(46, doc.heightOfString(safe, { width: 471, lineGap: 2 }) + 20))
+      const y = doc.y
+      doc.roundedRect(LEFT, y, WIDTH, height, 5).fill(NAVY)
+      doc.font('Courier').fontSize(7.4).fillColor('#e6edf5').text(safe, LEFT + 12, y + 10, { width: 475, height: height - 18, ellipsis: true, lineGap: 2 })
+      doc.y = y + height + 3
+    }
+    const timelineItem = (index: number, label: string, at: string | null | undefined, value: unknown, state = '') => {
+      const raw = clean(value)
+      const safe = raw.length > 1600 ? `${raw.slice(0, 1597)}...` : raw
+      const estimated = Math.max(42, doc.heightOfString(safe, { width: 471, lineGap: 1 }) + 26)
+      ensure(estimated); const y = doc.y
+      doc.circle(LEFT + 8, y + 8, 8).fill(state ? tone(state) : BLUE)
+      doc.font('Helvetica-Bold').fontSize(7).fillColor('#ffffff').text(String(index), LEFT + 4, y + 5, { width: 8, align: 'center' })
+      doc.font('Helvetica-Bold').fontSize(8.7).fillColor(INK).text(label, LEFT + 28, y, { width: 250 })
+      doc.font('Helvetica').fontSize(7.5).fillColor(MUTED).text(timestamp(at), LEFT + 300, y + 1, { width: 199, align: 'right' })
+      doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(safe, LEFT + 28, y + 15, { width: 471, lineGap: 1 })
+      doc.y = Math.max(doc.y, y + estimated)
     }
 
-    // Helper: numbered section heading
-    const section = (number: string, title: string) => {
-      doc.moveDown(1.1)
-      doc.font('Helvetica-Bold').fontSize(12).fillColor(ACCENT)
-      doc.text(`${number}. ${title}`)
-      doc.moveDown(0.35)
-      doc.moveTo(48, doc.y).lineTo(547, doc.y).strokeColor(LINE).lineWidth(0.7).stroke()
-      doc.moveDown(0.6)
+    doc.rect(LEFT, LEFT, WIDTH, 6).fill(BLUE); doc.y = 70
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(BLUE).text('BUILDHUB · AI SELF-HEALING OPERATIONS', { characterSpacing: 1.2 })
+    doc.moveDown(0.35).font('Helvetica-Bold').fontSize(22).fillColor(NAVY).text('INCIDENT REPORT')
+    doc.moveDown(0.2).font('Helvetica').fontSize(9).fillColor(MUTED).text(`${detail.ref} · generated ${timestamp(input.generatedAt)}`)
+    doc.moveDown(0.85); badge('Final incident status', detail.status)
+    field('Incident ID', detail.ref)
+    field('Severity / risk', `${detail.severity} / ${brief?.risk.tier ?? detail.severity} · score ${detail.riskScore}/100`)
+    field('Endpoint / request', `${detail.method} ${detail.endpoint}${detail.requestId ? ` · ${detail.requestId}` : ''}`)
+    field('Detected', timestamp(detail.createdAt)); field('What happened', detail.summary ?? detail.description)
+
+    section('1. Technical diagnosis', 'Persisted incident, AgentRun, patch, and validation facts')
+    field('Root cause', brief?.rootCause ?? detail.expectedRootCause); field('File', brief?.location?.file ?? brief?.patch?.file)
+    field('Line', brief?.location?.line); field('Function', brief?.location?.function)
+    field('Detection evidence', brief?.history?.logExcerpt ?? detail.logs[0]?.message)
+
+    section('2. Agent summaries')
+    const analyzer = detail.agentRuns.filter((run) => (run.kind ?? run.agent) === 'ANALYZER').at(-1)
+    field('Analyzer', analyzer?.outputSummary ?? analyzer?.currentActivity)
+    const rounds = brief?.aiAnalysis.rounds ?? []
+    if (rounds.length === 0) paragraph('No persisted Coder/Critic conversation was recorded for this incident.')
+    for (const round of rounds) {
+      field(`Coder · round ${round.round}`, round.coder.diagnosis ?? round.coder.status)
+      field(`Critic · round ${round.round}`, `${round.critic.verdict ?? 'Not recorded'} · ${round.critic.reasoning ?? 'No structured review summary recorded.'}`)
+    }
+    field('Judge decision', brief?.aiAnalysis.judge ? `${brief.aiAnalysis.judge.decision ?? 'Not recorded'} · ${brief.aiAnalysis.judge.reasoning ?? ''}` : null)
+    field('Risk classification', `${brief?.risk.tier ?? detail.severity} · ${brief?.risk.reason ?? 'No additional reason recorded.'}`)
+
+    code('3. Proposed change · BEFORE', brief?.codeChange?.before); code('4. Proposed change · AFTER', brief?.codeChange?.after)
+    field('Change summary', brief?.proposedFix)
+
+    section('5. Validation, rollback, and human control')
+    field('Validation plan', brief?.validationPlan)
+    field('Validation result', `${brief?.validation.result ?? detail.terminalSummary?.validation.result ?? 'not_run'} · ${brief?.validation.detail ?? detail.terminalSummary?.validation.detail ?? 'No detail recorded.'}`)
+    field('Probes', brief?.validation.probes.length ? brief.validation.probes.map((probe) => `${probe.ok ? 'PASS' : 'FAIL'} ${probe.name}`).join('\n') : null)
+    field('Human decision', brief?.approval ? `${brief.approval.status} · ${brief.approval.operator ?? 'operator not recorded'} · ${timestamp(brief.approval.createdAt)}` : null)
+    field('Rollback result', brief?.patch?.rolledBackAt ? `Rolled back at ${timestamp(brief.patch.rolledBackAt)}; original content restored.` : detail.status === 'ROLLED_BACK' ? 'Rollback recorded.' : 'Rollback not required.')
+
+    section('6. Complete chronological timeline', brief?.attack ? 'Security sequence is expanded in the next section.' : 'Operational sequence from detection through learning')
+    const eventFor = (pattern: RegExp) => detail.timeline.find((event) => pattern.test(`${event.stage} ${event.label}`))
+    const runFor = (kind: string) => detail.agentRuns.filter((run) => (run.kind ?? run.agent) === kind).at(-1)
+    const approval = detail.approvals[0]
+    const gmail = input.gmail.find((row) => /APPROVAL/.test(row.type)) ?? input.gmail[0]
+    const telegram = input.telegram.find((row) => row.type === 'FINAL_SUMMARY') ?? input.telegram[0]
+    const standard: Array<[string, string | null | undefined, unknown, string]> = [
+      ['Incident detected', detail.createdAt, detail.description, detail.status],
+      ['Evidence / log captured', detail.logs.at(-1)?.createdAt, brief?.history?.logExcerpt ?? detail.logs.at(-1)?.message, detail.logs.length ? 'complete' : ''],
+      ['Analyzer result', runFor('ANALYZER')?.completedAt ?? runFor('ANALYZER')?.createdAt, runFor('ANALYZER')?.outputSummary, runFor('ANALYZER')?.status ?? ''],
+      ['Coder proposal', runFor('CODER')?.completedAt ?? runFor('CODER')?.createdAt, runFor('CODER')?.outputSummary ?? brief?.proposedFix, runFor('CODER')?.status ?? ''],
+      ['Critic review', runFor('CRITIC')?.completedAt ?? runFor('CRITIC')?.createdAt, runFor('CRITIC')?.outputSummary ?? rounds.at(-1)?.critic.reasoning, runFor('CRITIC')?.status ?? ''],
+      ['Judge decision', runFor('JUDGE')?.completedAt ?? runFor('JUDGE')?.createdAt, runFor('JUDGE')?.outputSummary ?? brief?.aiAnalysis.judge?.reasoning, runFor('JUDGE')?.status ?? ''],
+      ['Risk classification', detail.repairAttempt?.startedAt, `${brief?.risk.tier ?? detail.severity} · ${brief?.risk.reason ?? 'Persisted incident severity policy'}`, brief?.risk.tier ?? detail.severity],
+      ['Gmail approval request sent', gmail?.createdAt, gmail ? `${gmail.deliveryStatus} · ${gmail.type}${gmail.externalMessageId ? ` · message ${gmail.externalMessageId}` : ''}` : null, gmail?.deliveryStatus ?? ''],
+      ['Human APPROVE / REJECT', approval?.statusUpdatedAt ?? approval?.createdAt, approval ? `${approval.status} · ${approval.reviewer}` : null, approval?.status ?? ''],
+      ['Patch applied', brief?.patch?.appliedAt ?? detail.patch?.createdAt, brief?.patch ? `${brief.patch.status} · ${brief.patch.patchId}` : null, brief?.patch?.status ?? ''],
+      ['Validation started', eventFor(/VALIDAT/i)?.at, eventFor(/VALIDAT/i)?.detail ?? 'Validation begins after patch application.', eventFor(/VALIDAT/i)?.stage ?? ''],
+      ['Validation result', brief?.validation.validatedAt ?? detail.patch?.validatedAt, `${brief?.validation.result ?? 'not_run'} · ${brief?.validation.detail ?? 'No detail recorded.'}`, brief?.validation.result ?? ''],
+      ['Recovery or rollback', detail.resolvedAt ?? brief?.patch?.rolledBackAt, detail.terminalSummary?.text ?? detail.status, detail.status],
+      ['Telegram notification', telegram?.createdAt, telegram ? `${telegram.deliveryStatus} · ${telegram.type}${telegram.externalMessageId ? ` · message ${telegram.externalMessageId}` : ''}` : null, telegram?.deliveryStatus ?? ''],
+      ['Final incident status', detail.updatedAt, detail.status, detail.status],
+      ['Learning / repair-memory record', detail.learning?.updatedAt, detail.learning ? `${detail.learning.outcome} · reward ${detail.learning.reward} · recurrence ${detail.learning.recurrenceCount}` : null, detail.learning?.outcome ?? ''],
+    ]
+    standard.forEach((row, index) => timelineItem(index + 1, ...row))
+
+    if (brief?.attack) {
+      section('7. Security incident record', 'ATTACK → DETECTION → ANALYSIS → RISK → MITIGATION → SERVICE RESPONSE → NOTIFICATION → FINAL RESULT')
+      const finding = input.securityEvidence[0]
+      const blocked = detail.logs.filter((log) => log.errorCode === 'IP_BLOCKED')
+      const failed = detail.logs.filter((log) => log.errorCode === 'AUTH_FAILED')
+      const securityTimeline: Array<[string, string | null | undefined, unknown, string]> = [
+        ['ATTACK', failed.at(-1)?.createdAt ?? finding?.firstSeenAt, finding?.detail ?? detail.description, 'HIGH'],
+        ['DETECTION', detail.createdAt, `${finding?.hitCount ?? failed.length} suspicious requests · ${finding?.ruleId ?? detail.errorCode ?? 'security signal'}`, detail.severity],
+        ['ANALYSIS', runFor('FIXER')?.completedAt, runFor('FIXER')?.outputSummary ?? detail.summary, runFor('FIXER')?.status ?? ''],
+        ['RISK', detail.createdAt, `${detail.severity} · risk score ${detail.riskScore}/100`, detail.severity],
+        ['MITIGATION', blocked.at(-1)?.createdAt ?? finding?.lastSeenAt, blocked.length ? `${blocked.length} request(s) rejected by the temporary source-IP block / rate limit.` : finding?.detail, blocked.length || finding?.detail ? 'complete' : ''],
+        ['SERVICE RESPONSE', detail.updatedAt, `Health ${overview.systemHealth}% · reliability ${overview.applicationReliabilityScore}% · cyber safety ${overview.cyberSafetyScore}%`, overview.systemHealth >= 65 ? 'complete' : 'failed'],
+        ['NOTIFICATION', gmail?.createdAt ?? telegram?.createdAt, `Gmail ${gmail?.deliveryStatus ?? 'not recorded'} · Telegram ${telegram?.deliveryStatus ?? 'not recorded'}`, gmail?.deliveryStatus ?? telegram?.deliveryStatus ?? ''],
+        ['FINAL RESULT', detail.resolvedAt ?? detail.updatedAt, detail.terminalSummary?.text ?? detail.status, detail.status],
+      ]
+      securityTimeline.forEach((row, index) => timelineItem(index + 1, ...row))
+      field('Service health before / after', `Detection risk ${detail.riskScore}/100 · current system health ${overview.systemHealth}% · total health ${overview.totalHealthScore}%`)
     }
 
-    // ------------------------- Header -------------------------
-    doc.rect(48, 48, 499, 4).fill(ACCENT)
-    doc.moveDown(1.6)
-    doc.font('Helvetica-Bold').fontSize(20).fillColor(INK).text('BUILDHUB INCIDENT REPORT')
-    doc.moveDown(0.2)
-    doc.font('Helvetica').fontSize(9).fillColor(MUTED)
-    doc.text(`Generated ${generatedAt} · BuildHub Observability · Phase 7`)
-    doc.moveDown(0.9)
-
-    // ------------------------- Metadata -------------------------
-    metaRow('Incident ID', detail.ref)
-    metaRow('Date', detail.createdAt)
-    metaRow('Severity', detail.severity)
-    metaRow('Risk Score', `${detail.riskScore} / 100`)
-    metaRow('Cyber Safety Score', `${overview.cyberSafetyScore} / 100`)
-    metaRow('Status', detail.status)
-    metaRow('Endpoint', `${detail.method} ${detail.endpoint}`)
-    if (detail.requestId) metaRow('Request ID', detail.requestId)
-    if (detail.errorCode) metaRow('Error code', detail.errorCode)
-    doc.moveDown(0.6)
-    doc
-      .rect(48, doc.y, 499, 0.7)
-      .fillColor(LINE)
-      .fill()
-    doc.moveDown(0.8)
-
-    // ------------------------- 1. Executive Summary -------------------------
-    section('1', 'Executive Summary')
-    doc.font('Helvetica').fontSize(10).fillColor(INK)
-    doc.text(
-      detail.summary && detail.summary.length > 0
-        ? detail.summary
-        : detail.description,
-    )
-
-    // ------------------------- 2. What Happened -------------------------
-    section('2', 'What Happened')
-    doc.text(detail.description)
-
-    // ------------------------- 3. Affected Components -------------------------
-    section('3', 'Affected Components')
-    const services = Array.from(
-      new Set(detail.logs.map((l: LogEventDTO) => l.service).filter(Boolean)),
-    )
-    if (services.length > 0) {
-      services.forEach((s) => doc.font('Helvetica').fontSize(10).text(`• ${s}`))
-    } else {
-      doc.text('• API (endpoint under observation)')
-    }
-    doc.text('• Monitoring (incident captured in observability store)')
-
-    // ------------------------- 4. Timeline -------------------------
-    section('4', 'Timeline  (observed facts)')
-    if (detail.timeline.length === 0) {
-      doc.font('Helvetica').fontSize(10).fillColor(MUTED).text('No timeline recorded.')
-    } else {
-      detail.timeline.forEach((event) => {
-        const x = 48
-        doc.circle(x + 2.5, doc.y + 3.5, 2.5).fillColor(ACCENT).fill()
-        doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(
-          event.at.slice(0, 16).replace('T', ' '),
-          x + 14,
-          doc.y,
-          { width: 120, lineBreak: false },
-        )
-        doc.font('Helvetica').fontSize(9.5).fillColor(INK).text(
-          event.label,
-          x + 140,
-          doc.y,
-          { width: 359 },
-        )
-        doc.moveDown(0.35)
-      })
+    section(brief?.attack ? '8. Notification delivery audit' : '7. Notification delivery audit')
+    for (const [channel, rows] of [['Gmail', input.gmail], ['Telegram', input.telegram]] as const) {
+      if (rows.length === 0) field(channel, 'No delivery record persisted.')
+      for (const row of rows) field(channel, `${row.deliveryStatus} · ${row.type} · ${timestamp(row.createdAt)}${row.externalMessageId ? ` · message ${row.externalMessageId}` : ''}${row.error ? ` · ${row.error}` : ''}`)
     }
 
-    // ------------------------- 5. Relevant Logs -------------------------
-    section('5', 'Relevant Logs  (top entries)')
-    if (detail.logs.length === 0) {
-      doc.font('Helvetica').fontSize(10).fillColor(MUTED).text('No associated log events.')
-    } else {
-      const rows = detail.logs.slice(0, 12)
-      rows.forEach((log) => {
-        const level = log.level ?? 'INFO'
-        const color = levelColor(level)
-        doc.circle(48 + 2.5, doc.y + 3, 2.5).fillColor(color).fill()
-        doc.font('Helvetica-Bold').fontSize(8).fillColor(color).text(
-          level.padEnd(7),
-          48 + 14,
-          doc.y,
-          { width: 58, lineBreak: false },
-        )
-        doc.font('Helvetica').fontSize(8).fillColor(MUTED).text(
-          `${log.service ?? '-'}`,
-          48 + 78,
-          doc.y,
-          { width: 70, lineBreak: false },
-        )
-        doc.font('Helvetica').fontSize(8).fillColor(INK).text(
-          (log.method ? `${log.method} ` : '') +
-            (log.route ?? '-') +
-            (log.status ? ` · ${log.status}` : ''),
-          48 + 154,
-          doc.y,
-          { width: 345 },
-        )
-        doc.moveDown(0.02)
-        doc.font('Helvetica').fontSize(8.5).fillColor(INK).text(
-          log.message.length > 110 ? `${log.message.slice(0, 110)}…` : log.message,
-          48 + 14,
-          doc.y,
-          { indent: 14, width: 485 },
-        )
-        doc.moveDown(0.45)
-      })
+    section(brief?.attack ? '9. Final outcome and learning' : '8. Final outcome and learning')
+    badge('Outcome', detail.status); field('Final outcome', detail.terminalSummary?.text ?? detail.summary ?? detail.status)
+    field('Repair memory', detail.learning ? `${detail.learning.outcome} · reward ${detail.learning.reward} · risk ${detail.learning.risk ?? 'Not recorded'} · human ${detail.learning.humanDecision ?? 'Not recorded'}` : null)
+    field('Reward breakdown', detail.learning?.rewardBreakdown ? Object.entries(detail.learning.rewardBreakdown).map(([key, value]) => `${key}: ${value}`).join(' · ') : null)
+
+    const range = doc.bufferedPageRange()
+    for (let page = range.start; page < range.start + range.count; page += 1) {
+      doc.switchToPage(page)
+      doc.font('Helvetica').fontSize(7).fillColor(MUTED).text(`BuildHub | persisted incident evidence | ${detail.ref}`, LEFT, 782, { width: 390, lineBreak: false })
+      doc.text(`Page ${page - range.start + 1} of ${range.count}`, 438, 782, { width: 109, align: 'right', lineBreak: false })
     }
-
-    // ------------------------- 6. AI Pipeline Status -------------------------
-    const failedRuns = detail.agentRuns.filter((run) => run.status === 'FAILED')
-    const completedRuns = detail.agentRuns.filter((run) => run.status === 'COMPLETE')
-    section('6', 'AI Pipeline Status  (REAL — Groq-backed)')
-    if (failedRuns.length > 0) {
-      doc
-        .fillColor(WARNING)
-        .rect(48, doc.y, 499, 26)
-        .fill()
-      doc.fillColor([23, 23, 27]).font('Helvetica-Bold').fontSize(8.5).text(
-        'AI ANALYSIS UNAVAILABLE  ·  some agent runs failed against Groq.',
-        58,
-        doc.y + 8,
-        { width: 479 },
-      )
-      doc.font('Helvetica').fontSize(8.5).text(
-        `Completed ${completedRuns.length}, failed ${failedRuns.length}. Recommendations below reflect only the runs that succeeded.`,
-        58,
-        doc.y,
-        { width: 479 },
-      )
-    } else if (detail.agentRuns.length > 0) {
-      doc
-        .fillColor(SUCCESS)
-        .rect(48, doc.y, 499, 26)
-        .fill()
-      doc.fillColor([23, 23, 27]).font('Helvetica-Bold').fontSize(8.5).text(
-        'REAL ANALYSIS  ·  Fixer → Critic → Judge ran against Groq.',
-        58,
-        doc.y + 8,
-        { width: 479 },
-      )
-      doc.font('Helvetica').fontSize(8.5).text(
-        'Candidate fixes are advisory text rendered from real model output; nothing was applied automatically.',
-        58,
-        doc.y,
-        { width: 479 },
-      )
-    } else {
-      doc
-        .fillColor(SUCCESS)
-        .rect(48, doc.y, 499, 26)
-        .fill()
-      doc.fillColor([23, 23, 27]).font('Helvetica-Bold').fontSize(8.5).text(
-        'NO PIPELINE RUNS RECORDED  ·  the real pipeline has not been triggered for this incident.',
-        58,
-        doc.y + 8,
-        { width: 479 },
-      )
-      doc.font('Helvetica').fontSize(8.5).text(
-        'Once a security operator runs the pipeline, this section reflects actual Groq output.',
-        58,
-        doc.y,
-        { width: 479 },
-      )
-    }
-    doc.moveDown(0.9)
-
-    if (detail.agentRuns.length === 0) {
-      doc.font('Helvetica').fontSize(10).fillColor(MUTED).text('No pipeline runs recorded.')
-    } else {
-      detail.agentRuns.forEach((run: AgentRunDTO) => {
-        doc.font('Helvetica-Bold').fontSize(9.5).fillColor(INK).text(
-          run.agent.padEnd(8) +
-            `/  ${run.status}` +
-            (run.progress !== null && run.progress !== undefined
-              ? `  ·  ${run.progress}%`
-              : '') +
-            (run.confidence !== null && run.confidence !== undefined
-              ? `  ·  confidence ${run.confidence}%`
-              : '') +
-            `  ·  ${run.mode}`,
-        )
-        if (run.outputSummary) {
-          doc.font('Helvetica').fontSize(9).fillColor(MUTED).text(run.outputSummary, { indent: 10 })
-        }
-        doc.moveDown(0.35)
-      })
-    }
-
-    // ------------------------- 6.5 Alert Delivery (Telegram) -------------------------
-    section('6.5', 'Alert Delivery  (Telegram — append-only delivery log)')
-    if (alerts.length === 0) {
-      doc.font('Helvetica').fontSize(10).fillColor(MUTED).text('No Telegram alerts recorded for this incident.')
-    } else {
-      alerts.forEach((alert) => {
-        const ok = alert.deliveryStatus === 'SENT'
-        const duplicate = alert.deliveryStatus === 'SKIPPED_DUPLICATE'
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(ok ? SUCCESS : duplicate ? WARNING : DANGER).text(
-          alert.deliveryStatus.replace(/_/g, ' ').padEnd(18) +
-            `  ·  ${alert.type}` +
-            (alert.severity ? `  ·  ${alert.severity}` : '') +
-            (alert.telegramMessageId ? `  ·  message ${alert.telegramMessageId}` : ''),
-        )
-        if (alert.error) {
-          doc.font('Helvetica').fontSize(8.5).fillColor(DANGER).text(`Delivery error: ${alert.error}`, { indent: 10 })
-        }
-        doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(
-          alert.createdAt.slice(0, 16).replace('T', ' '),
-          { indent: 10 },
-        )
-        doc.moveDown(0.3)
-      })
-    }
-
-    // ------------------------- 6.6 Terminal Summary (Final Status) -------------------------
-    section('6.6', 'Terminal Summary  (final status — same content as the Telegram FINAL_SUMMARY)')
-    if (!detail.terminalSummary) {
-      doc.font('Helvetica').fontSize(10).fillColor(MUTED).text('No terminal state reached yet (incident still open).')
-    } else {
-      const summary = detail.terminalSummary
-      const summaryColor =
-        summary.validation.result === 'pass' ? SUCCESS : summary.validation.result === 'fail' ? DANGER : WARNING
-      doc.font('Helvetica-Bold').fontSize(9).fillColor(summaryColor).text(
-        `${summary.finalState}  ·  validation ${summary.validation.result}`
-        + (summary.validation.probes.length > 0
-          ? `  ·  ${summary.validation.probes.filter((p) => p.ok).length}/${summary.validation.probes.length} probes OK`
-          : ''),
-      )
-      if (summary.validation.detail) {
-        doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(`Validation detail: ${summary.validation.detail}`, { indent: 10 })
-      }
-      const hasFinalDelivery = alerts.some(
-        (alert) => alert.type === 'FINAL_SUMMARY' && alert.deliveryStatus === 'SENT',
-      )
-      doc.font('Helvetica').fontSize(8.5).fillColor(hasFinalDelivery ? SUCCESS : WARNING).text(
-        hasFinalDelivery ? 'FINAL_SUMMARY delivered to Telegram (SENT).' : 'FINAL_SUMMARY not confirmed as SENT.',
-        { indent: 10 },
-      )
-      doc.moveDown(0.3)
-      doc.font('Helvetica').fontSize(8.5).fillColor(MUTED).text(
-        summary.text.replace(/<[^>]+>/g, ''),
-        { indent: 10 },
-      )
-    }
-
-    // ------------------------- 7. Previous Similar Incidents -------------------------
-    section('7', 'Previous Similar Incidents')
-    if (detail.previous.length === 0) {
-      doc.font('Helvetica').fontSize(10).fillColor(MUTED).text('No similar incidents found.')
-    } else {
-      detail.previous.forEach((prev) => {
-        doc.font('Helvetica').fontSize(9).fillColor(INK).text(
-          `${prev.ref}  ·  ${prev.severity}  ·  ${prev.status}  ·  ${prev.title}  ·  ${prev.createdAt.slice(0, 10)}`,
-        )
-      })
-    }
-
-    // ------------------------- 8. Human Approval History -------------------------
-    section('8', 'Human Approval History  (workflow history only)')
-    if (detail.approvals.length === 0) {
-      doc.font('Helvetica').fontSize(10).fillColor(MUTED).text('No approval decisions recorded.')
-    } else {
-      detail.approvals.forEach((approval) => {
-        const color = approval.status === 'APPROVED' ? SUCCESS : DANGER
-        doc.font('Helvetica-Bold').fontSize(9).fillColor(color).text(approval.status)
-        doc.font('Helvetica').fontSize(9).fillColor(INK).text(
-          `Operator ${approval.operator} · ${approval.createdAt.slice(0, 16).replace('T', ' ')}`,
-        )
-        doc.moveDown(0.35)
-      })
-    }
-
-    // ------------------------- 9. Current Status -------------------------
-    section('9', 'Current Status')
-    const statusColor =
-      detail.status === 'RESOLVED' || detail.status === 'ROLLED_BACK' ? SUCCESS : severityColor(detail.severity)
-    doc.font('Helvetica').fontSize(10).fillColor(INK)
-    doc.text(`Incident status: `, { continued: true })
-    doc.font('Helvetica-Bold').fillColor(statusColor).text(detail.status)
-    doc.fillColor(INK).font('Helvetica').fontSize(10)
-    doc.text(`System risk score: ${overview.riskScore} / 100`)
-    doc.text(`Cyber safety score: ${overview.cyberSafetyScore} / 100`)
-    doc.text(`System health: ${overview.systemHealth}% · Active incidents: ${overview.activeIncidents}`)
-
-    // ------------------------- 10. Recommended Next Step -------------------------
-    section('10', 'Recommended Next Step  (advisory)')
-    const recommendation = advisoryForStatus(detail)
-    doc.font('Helvetica').fontSize(10).fillColor(INK).text(recommendation)
-
-    // ------------------------- Footer -------------------------
-    doc.moveDown(1.4)
-    doc.moveTo(48, doc.y).lineTo(547, doc.y).strokeColor(LINE).lineWidth(0.7).stroke()
-    doc.moveDown(0.5)
-    doc.font('Helvetica').fontSize(7.5).fillColor(MUTED)
-    doc.text(
-      'OBSERVED FACTS: incident metadata, timeline, logs and approvals recorded by BuildHub observability. ' +
-      'REAL AI ANALYSIS: pipeline status and recommendations reflect actual Groq calls; if an agent run failed it is reported as AI ANALYSIS UNAVAILABLE.',
-      { width: 499, align: 'left' },
-    )
-    doc.moveDown(0.3)
-    doc.text('BUILDHUB SECURITY COMMAND CENTER · PHASE 8', { align: 'center' })
-
     doc.end()
   })
-}
-
-function advisoryForStatus(detail: IncidentDetailDTO): string {
-  if (detail.status === 'RESOLVED') {
-    return 'Incident is resolved. Continue monitoring for recurrence; close the incident after the observation window is clean. OBSERVED — no action required.'
-  }
-  if (detail.status === 'ROLLED_BACK') {
-    return 'A change was rolled back. Keep the incident open until the follow-up verification window confirms stable behavior, then resolve. OBSERVED — no action required.'
-  }
-  if (detail.status === 'AWAITING_REVIEW') {
-    return 'Awaiting human review. The Fixer candidate was advisory text only and has not been applied; a reviewer should assess the context and decide next steps.'
-  }
-  return 'Investigation ongoing. Collect further context, correlate with related log events, and prepare a review package. No automated mitigation has been applied.'
 }

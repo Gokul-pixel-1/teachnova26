@@ -27,7 +27,8 @@ const MAX_STACK_LINES = 14
  * registry is the single source of truth for a fault's risk tier, so the
  * incident severity, riskScore, cyberSafetyImpact and Judge input stay
  * consistent with the fault definition. Two deterministic keys are used:
- *   1) an explicit fault id embedded in the thrown message ("LOW-01: …"), or
+ *   1) an explicit fault id embedded in the thrown message ("LOW-01: …",
+ *      "COMMENT-01: …"), or
  *   2) the exact thrownMessage a wired guard surfaces + the trigger route.
  * Falls back to null when the failure is not a controlled fault. */
 function faultFor(
@@ -36,7 +37,7 @@ function faultFor(
   message: string | null,
 ): FaultConfig | null {
   const msg = message ?? ''
-  const idMatch = msg.match(/\b((?:LOW|MEDIUM|HIGH)-\d{1,2})\b/)
+  const idMatch = msg.match(/\b((?:LOW|MEDIUM|HIGH|COMMENT)-\d{1,2})\b/)
   if (idMatch) {
     const fault = FAULT_REGISTRY[idMatch[1]]
     // The registry tier describes the CONTROLLED fault (runtime guard

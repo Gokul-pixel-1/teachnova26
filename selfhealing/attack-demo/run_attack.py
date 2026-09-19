@@ -92,6 +92,7 @@ SCENARIOS = ("request-flood", "resource-stress", "service-failure")
 # valid-shape but wholly forged credentials against the real sign-in endpoint.
 LOGIN_PATH = "/api/auth/login"
 HEALTH_PATH = "/api/health"
+ME_PATH = "/api/auth/me"
 POSTS_PATH = "/api/posts"
 PROJECTS_PATH = "/api/projects"
 PASSWORD = "7aX-contr0l-local"
@@ -324,17 +325,42 @@ def main() -> int:
     started_at = iso_now()
 
     # Pre-flight — refuse to fire at a server that is already down.
+    # Availability rule (fail-closed, never faked):
+    #   * connection refused / timeout on BOTH probes = unavailable
+    #     (nothing listening — start the server first) -> ABORT.
+    #   * genuine 5xx on BOTH probes, or an explicit health "unavailable"
+    #     with the app endpoint also failing (5xx/unreachable) =
+    #     corroborated service failure -> ABORT.
+    #   * any other valid HTTP response proves the server answers requests —
+    #     notably the expected 401/403 from the authenticated endpoint
+    #     (/api/auth/me) without a session, which is healthy proof-of-life
+    #     and must NEVER be read as "server unavailable".
+    # A single faulted signal while the other probe answers is reported
+    # honestly as a WARNING but the run proceeds: the loop's own health
+    # watcher keeps observing /api/health live and stops the moment it
+    # reports UNAVAILABLE, so no degraded state is ever misrepresented.
     boot_health, boot_code, _ = probe_health(base)
-    if boot_code is None:
-        print(f"ABORT: nothing listening at {base} (/api/health unreachable). Start the server first.")
+    me_code, _, _ = http_json("GET", base, ME_PATH)
+    if boot_code is None and me_code is None:
+        print(f"ABORT: nothing listening at {base} (/api/health and {ME_PATH} unreachable: connection refused/timeout). Start the server first.")
         return 2
-    if boot_health == "unavailable":
+    health_down = boot_health == "unavailable" or (boot_code is not None and boot_code >= 500)
+    me_down = me_code is None or me_code >= 500
+    if health_down and me_down:
         print(
-            f"ABORT: {base} is ALREADY unavailable ({boot_health}). "
+            f"ABORT: {base} is ALREADY unavailable (health={boot_health} HTTP {boot_code}, "
+            f"{ME_PATH} HTTP {me_code}). "
             "Reset/recover the server before running the attack."
         )
         return 2
     print(f"pre-flight /api/health @ {base} -> {boot_health} (HTTP {boot_code})")
+    print(f"pre-flight {ME_PATH} @ {base} -> HTTP {me_code} (expected 401/403 without a session = server reachable)")
+    if health_down or me_down:
+        print(
+            f"WARNING: {base} health signals disagree (health={boot_health} HTTP {boot_code}, "
+            f"{ME_PATH} HTTP {me_code}) — proceeding because the server answers requests; "
+            "the live health watcher will stop the run the moment /api/health reports UNAVAILABLE."
+        )
     if args.port == 3001 and boot_health == "degraded":
         print("  note: already degraded; an operator reset may be needed for a clean run.")
 

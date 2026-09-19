@@ -205,3 +205,32 @@ body {
 .command-ticker-row {
   animation: tickerScroll 0.35s ease-out both;
 }
+
+/* AI command center: a restrained operations-grade depth layer. */
+.command-hero {
+  background-image:
+    linear-gradient(118deg, color-mix(in srgb, var(--bh-accent) 7%, transparent), transparent 43%),
+    radial-gradient(circle at 80% 18%, color-mix(in srgb, var(--bh-info) 10%, transparent), transparent 34%);
+}
+
+.command-hero-glow {
+  position: absolute;
+  inset: -40% -15% auto 42%;
+  height: 24rem;
+  border-radius: 9999px;
+  background: color-mix(in srgb, var(--bh-accent) 10%, transparent);
+  filter: blur(70px);
+  pointer-events: none;
+}
+
+.command-center-experience svg [role='button']:focus-visible rect {
+  stroke: var(--bh-accent);
+  stroke-width: 3;
+}
+
+@media (max-width: 640px) {
+  .command-center-experience {
+    max-width: 100%;
+    overflow-x: clip;
+  }
+}

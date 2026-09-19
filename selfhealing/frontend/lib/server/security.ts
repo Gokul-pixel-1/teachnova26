@@ -18,6 +18,7 @@ import { Prisma } from '@prisma/client'
 import type { SafeUser } from './auth'
 import { NextResponse } from 'next/server'
 import { createApproval } from './approval'
+import { sendSecurityIncidentEmail } from './gmail'
 
 // Phase 8 — security finding ingest, incident promotion and the real agent
 // pipeline. Fingerprinting/correlation happens here (Next.js side) so the
@@ -319,6 +320,7 @@ export interface PipelineResult {
   runs: Array<{ agent: AgentKind; status: string; summary?: string; error?: string }>
   aiUnavailable: boolean
   telegram: { sent: boolean; reason: string }
+  gmail: { sent: boolean; reason: string }
 }
 
 /**
@@ -344,6 +346,7 @@ export async function runAgentPipeline(incidentId: string): Promise<PipelineResu
       runs: [],
       aiUnavailable: false,
       telegram: { sent: false, reason: 'incident not found' },
+      gmail: { sent: false, reason: 'incident not found' },
     }
   }
 
@@ -362,6 +365,7 @@ export async function runAgentPipeline(incidentId: string): Promise<PipelineResu
       runs: runs.map(summarizeRuns),
       aiUnavailable: false,
       telegram: { sent: false, reason: 'pipeline already completed for this incident' },
+      gmail: { sent: false, reason: 'pipeline already completed for this incident' },
     }
   }
   if (runs.some((run) => run.status === 'ANALYZING')) {
@@ -371,6 +375,7 @@ export async function runAgentPipeline(incidentId: string): Promise<PipelineResu
       runs: runs.map(summarizeRuns),
       aiUnavailable: false,
       telegram: { sent: false, reason: 'pipeline currently running for this incident' },
+      gmail: { sent: false, reason: 'pipeline currently running for this incident' },
     }
   }
 
@@ -463,6 +468,7 @@ export async function runAgentPipeline(incidentId: string): Promise<PipelineResu
 
   const aiUnavailable = failed !== null
   let telegram: PipelineResult['telegram'] = { sent: false, reason: 'no alert sent' }
+  let gmail: PipelineResult['gmail'] = { sent: false, reason: 'no email sent' }
 
   if (!aiUnavailable) {
     const judge = runs.find((r) => r.agent === 'JUDGE')
@@ -496,6 +502,10 @@ export async function runAgentPipeline(incidentId: string): Promise<PipelineResu
     // push even when its own recorded riskScore was a plain severity weight.
     const overall = await computeSecurityOverview()
     telegram = await alertTelegramForIncident(incident, overall.riskScore)
+    const gmailResult = await sendSecurityIncidentEmail({ incident })
+    gmail = gmailResult.ok
+      ? { sent: true, reason: `sent${gmailResult.gmailMessageId ? ` · ${gmailResult.gmailMessageId}` : ''}` }
+      : { sent: false, reason: gmailResult.error ?? gmailResult.deliveryStatus }
   }
 
   return {
@@ -504,6 +514,7 @@ export async function runAgentPipeline(incidentId: string): Promise<PipelineResu
     runs: resultRuns,
     aiUnavailable,
     telegram,
+    gmail,
   }
 }
 

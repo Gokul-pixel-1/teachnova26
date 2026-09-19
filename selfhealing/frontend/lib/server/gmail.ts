@@ -270,29 +270,31 @@ export async function sendGmail({
 // ---------------------------------------------------------------------------
 
 function esc(value: string | null | undefined): string {
-  return (value ?? 'n/a')
+  return (value ?? 'Not recorded')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
 }
 
 function row(label: string, value: string | null | undefined): string {
-  return `<tr><td style="padding:6px 10px;color:#666;vertical-align:top;white-space:nowrap;">${esc(label)}</td><td style="padding:6px 10px;">${esc(value) || 'n/a'}</td></tr>`
+  return `<tr><td style="padding:7px 10px;color:#64748b;vertical-align:top;width:120px;font-size:12px;line-height:18px;">${esc(label)}</td><td style="padding:7px 10px;color:#172033;font-size:13px;line-height:19px;word-break:break-word;">${esc(value) || 'Not recorded'}</td></tr>`
 }
 
 function codeBlock(value: string | null | undefined): string {
   const body = esc(value).slice(0, 4000)
-  return `<pre style="background:#f4f4f5;padding:10px;border-radius:6px;overflow-x:auto;font-size:12px;">${body}</pre>`
+  return `<pre style="margin:8px 0 0;background:#0f172a;color:#dbeafe;border:1px solid #1e293b;padding:12px;border-radius:7px;white-space:pre-wrap;word-break:break-word;font:11px/17px SFMono-Regular,Consolas,Liberation Mono,monospace;">${body}</pre>`
 }
 
 function pageShell(title: string, accent: string, body: string): string {
   return [
-    '<div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:640px;margin:0 auto;color:#111;">',
-    `<div style="background:${accent};color:#fff;padding:14px 18px;border-radius:8px 8px 0 0;font-weight:700;">${esc(title)}</div>`,
-    '<div style="border:1px solid #e4e4e7;border-top:none;border-radius:0 0 8px 8px;padding:16px 18px;">',
+    '<div style="margin:0;padding:24px 10px;background:#eef2f6;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif;color:#172033;">',
+    '<div style="max-width:650px;margin:0 auto;background:#ffffff;border:1px solid #dbe3ec;border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(15,23,42,.08);">',
+    `<div style="height:5px;background:${accent};font-size:0;line-height:0;">&nbsp;</div>`,
+    `<div style="padding:24px 24px 20px;background:#0f172a;color:#ffffff;"><div style="font-size:10px;line-height:16px;letter-spacing:2px;font-weight:700;color:#67e8f9;">BUILDHUB AI SELF-HEALING</div><div style="margin-top:7px;font-size:23px;line-height:30px;font-weight:700;">${esc(title)}</div></div>`,
+    '<div style="padding:20px 20px 24px;">',
     body,
-    '<p style="color:#888;font-size:12px;margin-top:16px;">BuildHub Self-Healing DevOps · this message was generated from persisted incident state.</p>',
-    '</div></div>',
+    '<p style="color:#64748b;font-size:11px;line-height:17px;margin:22px 4px 0;border-top:1px solid #e2e8f0;padding-top:14px;">Generated from persisted BuildHub incident state. This message never includes credentials, OAuth tokens, API keys, client secrets, or private chain-of-thought.</p>',
+    '</div></div></div>',
   ].join('')
 }
 
@@ -317,10 +319,18 @@ export interface BuiltEmail {
 /** Renders the approval-request email (no sending — used by the sender and
  *  by the operator preview so "what you see" is byte-identical). */
 export async function buildApprovalEmail({ incident, risk, approvalId }: ApprovalEmailInput): Promise<BuiltEmail> {
-  const type: NotificationType = risk === 'MEDIUM' ? 'MEDIUM_RISK_APPROVAL_REQUIRED' : 'HIGH_RISK_APPROVAL_REQUIRED'
   const brief = await buildIncidentBrief(incident.id)
-
-  const approvalRow = await prisma.approval.findUnique({ where: { approvalId }, select: { id: true, expiresAt: true } })
+  const [approvalRow, analyzer] = await Promise.all([
+    prisma.approval.findUnique({
+      where: { approvalId },
+      select: { id: true, status: true, createdAt: true, expiresAt: true },
+    }),
+    prisma.agentRun.findFirst({
+      where: { incidentId: incident.id, kind: 'ANALYZER' },
+      orderBy: { createdAt: 'desc' },
+      select: { status: true, outputSummary: true, currentActivity: true, confidence: true },
+    }),
+  ])
   let approveUrl = `${appBaseUrl()}/ai/incidents/${incident.id}`
   let rejectUrl = approveUrl
   if (approvalRow) {
@@ -331,162 +341,154 @@ export async function buildApprovalEmail({ incident, risk, approvalId }: Approva
     if (reject) rejectUrl = `${appBaseUrl()}/api/approvals/email?token=${reject.token}`
   }
 
-  const accent = risk === 'MEDIUM' ? '#b45309' : '#b91c1c'
-  const subject = `[BuildHub][${risk}] Approval Required — Incident ${incident.ref}`
+  const persistedRisk = brief?.risk.tier === 'MEDIUM' || brief?.risk.tier === 'HIGH'
+    ? brief.risk.tier
+    : risk
+  const accent = persistedRisk === 'MEDIUM' ? '#d97706' : '#dc2626'
+  const subject = `[BuildHub][${persistedRisk}] Repair Approval Required — ${incident.ref}`
   const rounds = brief?.aiAnalysis.rounds ?? []
   const judge = brief?.aiAnalysis.judge ?? null
   const lastRound = rounds.length > 0 ? rounds[rounds.length - 1] : null
   const finalCriticVerdict = lastRound?.critic.verdict ?? 'n/a'
   const judgeRecommendation = judge?.decision === 'APPROVE' ? 'PROCEED' : 'REJECT'
-  // All values below come from the persisted incident + brief — never raw
-  // stacks, never secrets. Long code is truncated for deliverability.
   const before = (brief?.codeChange?.before ?? 'n/a').slice(0, 2000)
   const after = (brief?.codeChange?.after ?? 'n/a').slice(0, 2000)
   const hist = brief?.history ?? null
-  const expiresAt = brief?.approval?.expiresAt ?? null
+  const expiresAt = approvalRow?.expiresAt.toISOString() ?? brief?.approval?.expiresAt ?? null
   const attemptId = brief?.attempt?.attemptId ?? 'n/a'
   const incidentTimestamp = brief?.incident.createdAt ?? incident.createdAt.toISOString()
   const httpStatus = hist?.httpStatus ?? 'n/a'
-
-  const roundText = rounds
-    .map((r) => {
-      const parts = [
-        `Iteration ${r.round} — CODER: ${r.coder.diagnosis ?? r.coder.status} (confidence ${r.coder.confidence ?? 'n/a'})`,
-        `Iteration ${r.round} — CRITIC verdict: ${r.critic.verdict ?? 'n/a'}${r.critic.reasoning ? ` — ${r.critic.reasoning}` : ''}`,
-      ]
-      if (r.critic.requiredChanges.length > 0) parts.push(`Coder was asked to change: ${r.critic.requiredChanges.join('; ')}`)
-      if (r.critic.problems.length > 0) parts.push(`Problems found: ${r.critic.problems.join('; ')}`)
-      if (r.critic.securityConcerns.length > 0) parts.push(`Security concerns: ${r.critic.securityConcerns.join('; ')}`)
-      if (r.critic.testsRequired.length > 0) parts.push(`Missing validation: ${r.critic.testsRequired.join('; ')}`)
-      return parts.join('\n')
-    })
-    .join('\n')
-
-  const historyText = hist && hist.previous.length > 0
-    ? hist.previous
-      .map((p) => `${p.ref} (${p.status}, ${p.severity}): root cause "${(p.rootCause ?? 'n/a').slice(0, 160)}"; outcome ${p.outcome ?? 'unknown'}; reward ${p.reward ?? 'n/a'}; human ${p.humanDecision ?? 'n/a'}`)
-      .join('\n')
-    : 'No previous occurrences of this error signature. Historical repairs below are CONTEXT ONLY — do not blindly reuse an old patch; current evidence is authoritative.'
-
-  const canonicalPlan = [
-    '1. Apply patch.',
-    '2. Restart affected service.',
-    '3. Reproduce original failure.',
-    '4. Confirm original failure is gone.',
-    '5. Run relevant API test.',
-    '6. Run regression tests.',
-    '7. Verify logs contain no new errors.',
-    '8. Verify service health.',
-    '9. Rollback if any critical validation fails.',
-  ].join('\n')
+  const approvalStatus = approvalRow?.status ?? brief?.approval?.status ?? 'PENDING'
+  const analyzerSummary = analyzer?.outputSummary ?? analyzer?.currentActivity ?? brief?.rootCause ?? 'Pending persisted Analyzer summary.'
+  const evidenceUsed = [
+    hist?.logExcerpt ? `Log: ${hist.logExcerpt.slice(0, 320)}` : null,
+    incident.requestId ? `Request ${incident.requestId}` : null,
+    brief?.location?.file ? `${brief.location.file}${brief.location.line != null ? `:${brief.location.line}` : ''}` : null,
+  ].filter(Boolean).join(' · ') || 'Incident record and linked error evidence.'
+  const securityConcerns = lastRound?.critic.securityConcerns.length
+    ? lastRound.critic.securityConcerns.join('; ')
+    : 'No security concern was recorded by the Critic.'
+  const regressionConcerns = lastRound?.critic.problems.length
+    ? lastRound.critic.problems.join('; ')
+    : 'No regression concern was recorded by the Critic.'
+  const validationItems = [...new Set([
+    ...(judge?.validationItems ?? []),
+    brief?.validationPlan ?? null,
+    `Re-run ${incident.method} ${incident.endpoint} and verify the expected success response.`,
+    'Run related API and regression tests; verify health and error logs.',
+  ].filter((value): value is string => Boolean(value)))]
+  const rollbackPlan = 'Before applying the candidate, BuildHub checkpoints the original bytes and SHA-256. If any validation probe fails, the original bytes are restored, integrity is verified, and the incident becomes ROLLED_BACK.'
 
   const text = [
-    `${risk}-RISK CHANGE — human approval required before any patch is applied. No patch has been applied yet.`,
+    'BUILDHUB AI SELF-HEALING',
+    'Repair Approval Required',
     '',
-    'A. INCIDENT',
-    `Incident ID: ${incident.ref}`,
-    `Timestamp: ${incidentTimestamp}`,
-    'Application/service: BuildHub API',
-    `Endpoint: ${incident.method} ${incident.endpoint}`,
-    `HTTP status: ${httpStatus}`,
+    `Incident: ${incident.ref}`,
+    `Risk: ${persistedRisk}`,
+    `Problem: ${incident.title}`,
+    `Affected endpoint: ${incident.method} ${incident.endpoint}`,
+    `Approval status: ${approvalStatus}`,
+    '',
+    '--------------------------------',
+    '1. INCIDENT',
+    '--------------------------------',
     `WHAT IS THE PROBLEM? ${incident.title}`,
-    `Error message: ${brief?.incident.summary ?? incident.summary ?? incident.title}`,
-    `Error signature: ${hist?.signature ?? 'n/a'}`,
-    `Severity: ${incident.severity}`,
-    `Risk level: ${risk} — ${brief?.risk.reason ?? 'n/a'}`,
-    '',
-    'B. DETECTION EVIDENCE',
-    `Log evidence: ${(hist?.logExcerpt ?? 'n/a').slice(0, 500)}`,
+    `What happened: ${brief?.incident.summary ?? incident.summary ?? incident.description}`,
+    `HTTP status: ${httpStatus}`,
+    `Error: ${incident.errorCode ?? hist?.signature ?? 'n/a'}`,
+    `Timestamp: ${incidentTimestamp}`,
     `Request ID: ${brief?.incident.requestId ?? incident.requestId ?? 'n/a'}`,
-    `Occurrences linked to this incident: ${hist?.occurrences ?? 'n/a'}`,
-    `Related previous incidents: ${hist?.previous.length ?? 0} (see section G)`,
-    `Detected by: ${brief?.incident.detectedBy ?? incident.detectedBy ?? 'n/a'} (risk score ${brief?.incident.riskScore ?? incident.riskScore})`,
     '',
-    'C. ROOT CAUSE ANALYSIS',
-    `What failed: ${incident.title}`,
-    `Why it failed: ${brief?.rootCause ?? incident.expectedRootCause ?? 'n/a'}`,
+    '--------------------------------',
+    '2. AI ROOT CAUSE',
+    '--------------------------------',
     `WHAT CAUSED IT? ${brief?.rootCause ?? incident.expectedRootCause ?? 'n/a'}`,
-    `Affected file: ${brief?.location?.file ?? 'n/a'}`,
-    `Exact line/range: ${brief?.location?.line ?? 'n/a'}`,
-    `Function/module: ${brief?.location?.function ?? 'n/a'}`,
-    `Why the evidence supports this: ${lastRound?.coder.diagnosis ?? 'n/a'}`,
-    `If left unfixed: ${lastRound?.coder.affectedBehavior ?? 'continued failures on this endpoint'}`,
+    `File: ${brief?.location?.file ?? 'n/a'}`,
+    `Line: ${brief?.location?.line ?? 'n/a'}`,
+    `Function: ${brief?.location?.function ?? 'n/a'}`,
     '',
-    'D. CODER AGENT',
-    `Investigated: ${brief?.location?.file ?? 'n/a'}${brief?.location?.line != null ? `:${brief.location.line}` : ''} (${brief?.location?.function ?? 'n/a'})`,
-    `Root cause conclusion: ${brief?.rootCause ?? 'n/a'}`,
+    '--------------------------------',
+    '3. AGENT-1 ANALYZER',
+    '--------------------------------',
+    `Diagnosis summary: ${analyzerSummary}`,
+    `Evidence used: ${evidenceUsed}`,
+    `Confidence: ${analyzer?.confidence ?? lastRound?.coder.confidence ?? 'n/a'}`,
+    '',
+    '--------------------------------',
+    '4. AGENT-2 CODER',
+    '--------------------------------',
     `Proposed patch: ${brief?.proposedFix ?? 'n/a'}`,
     `BEFORE CODE: ${before}`,
     `PROPOSED AFTER CODE: ${after}`,
+    `Files changed: ${brief?.location?.file ?? brief?.patch?.file ?? 'n/a'}`,
     `Why the patch fixes it: ${lastRound?.coder.diagnosis ?? 'n/a'}`,
-    `Potential side effects: ${lastRound && lastRound.critic.problems.length > 0 ? lastRound.critic.problems.join('; ') : 'none flagged by Critic'}`,
     `CODER ANALYSIS: ${rounds.map((r) => `Round ${r.round}: ${r.coder.diagnosis ?? r.coder.status}`).join(' | ') || 'n/a'} (confidence ${lastRound?.coder.confidence ?? 'n/a'})`,
     '',
-    'E. CRITIC AGENT (independent review)',
-    roundText || 'CRITIC ANALYSIS: n/a',
+    '--------------------------------',
+    '5. AGENT-3 CRITIC',
+    '--------------------------------',
+    `Independent review: ${lastRound?.critic.reasoning ?? 'n/a'}`,
+    `Security concerns: ${securityConcerns}`,
+    `Regression concerns: ${regressionConcerns}`,
     `CRITIC ANALYSIS: final verdict ${finalCriticVerdict}`,
     '',
-    'F. JUDGE AGENT',
-    `Evidence considered: ${incident.method} ${incident.endpoint} failure (${httpStatus}), Coder diagnosis, Critic ${finalCriticVerdict}, ${hist?.previous.length ?? 0} historical occurrence(s)`,
-    `Coder conclusion: ${lastRound?.coder.diagnosis ?? 'n/a'}`,
-    `Critic conclusion: ${finalCriticVerdict}${lastRound?.critic.reasoning ? ` — ${lastRound.critic.reasoning}` : ''}`,
-    `Historical evidence: ${hist && hist.previous.length > 0 ? `${hist.previous.length} previous occurrence(s), latest outcome ${hist.previous[0].outcome ?? 'unknown'} (reward ${hist.previous[0].reward ?? 'n/a'})` : 'first occurrence'}`,
-    `Risk assessment: ${risk} — ${brief?.risk.reason ?? 'n/a'}`,
-    `Expected impact: ${lastRound?.coder.affectedBehavior ?? 'endpoint restored'}`,
-    `Required validation: ${judge && judge.validationItems.length > 0 ? judge.validationItems.join('; ') : 'apply, re-run failing request, regression probes'}`,
-    'Rollback strategy: original bytes checkpointed (SHA-256); automatic restore + ROLLED_BACK if validation fails.',
+    '--------------------------------',
+    '6. JUDGE',
+    '--------------------------------',
+    `Risk: ${persistedRisk}`,
+    `Confidence: ${judge?.confidence ?? 'n/a'}`,
+    `Decision: ${judge?.decision ?? 'n/a'} / ${judgeRecommendation}`,
+    `Reason: ${judge?.reasoning ?? brief?.risk.reason ?? 'n/a'}`,
     `JUDGE DECISION: ${judge ? `${judge.decision} (confidence ${judge.confidence ?? 'n/a'}) — ${judge.reasoning ?? ''}` : 'n/a'}`,
-    `Final recommendation: ${judgeRecommendation}`,
     '',
-    'G. HISTORICAL / MEMORY CONTEXT (context only — never blindly reuse)',
-    historyText,
+    '--------------------------------',
+    '7. VALIDATION PLAN',
+    '--------------------------------',
+    'VALIDATION PLAN:',
+    ...validationItems.map((item, index) => `${index + 1}. ${item}`),
     '',
-    'H. VALIDATION PLAN',
-    `VALIDATION PLAN: ${brief?.validationPlan ?? 'n/a'}`,
-    canonicalPlan,
-    'ROLLBACK PLAN: the original bytes are checkpointed (SHA-256) and restored automatically if validation fails; incident becomes ROLLED_BACK with a negative learning signal.',
+    '--------------------------------',
+    '8. ROLLBACK',
+    '--------------------------------',
+    `ROLLBACK PLAN: ${rollbackPlan}`,
     '',
-    'I. APPROVAL DECISION',
-    `APPROVE: ${approveUrl}`,
-    `REJECT: ${rejectUrl}`,
-    `Approval ${approvalId} · incident ${incident.ref} · repair attempt ${attemptId} · expires ${expiresAt ?? 'in 5 minutes'} · one-time links, idempotent replays.`,
+    '--------------------------------',
+    'HUMAN DECISION',
+    '--------------------------------',
+    `[ APPROVE REPAIR ] ${approveUrl}`,
+    `[ REJECT REPAIR ] ${rejectUrl}`,
+    'Approval expires in 5 minutes.',
+    `Expires at: ${expiresAt ?? 'n/a'}`,
+    `Approval ${approvalId} · repair attempt ${attemptId} · current status ${approvalStatus}.`,
     '',
-    'BuildHub Self-Healing: approval authorizes the repair only — validation decides RESOLVED vs ROLLED_BACK.',
-  ].join('\n')
+    'Approval authorizes only this repair attempt. Validation determines RESOLVED or ROLLED_BACK.',
+  ].join('\n').replace(/\bn\/a\b/g, 'Not recorded')
 
-  const button = (url: string, label: string, color: string) =>
-    `<a href="${esc(url)}" style="display:inline-block;background:${color};color:#fff;text-decoration:none;font-weight:700;padding:12px 26px;border-radius:8px;margin:6px 8px 6px 0;">${esc(label)}</a>`
-  const sec = (t: string) => `<h3 style="margin:18px 0 6px;">${esc(t)}</h3>`
+  const button = (url: string, label: string, color: string, secondary = false) =>
+    `<a href="${esc(url)}" style="display:inline-block;background:${secondary ? '#ffffff' : color};color:${secondary ? color : '#ffffff'};border:1px solid ${color};text-decoration:none;font-size:13px;line-height:18px;font-weight:700;padding:12px 20px;border-radius:7px;margin:5px 8px 5px 0;">${esc(label)}</a>`
+  const section = (number: string, title: string, body: string) => [
+    '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0 0 12px;border:1px solid #e2e8f0;border-radius:8px;border-collapse:separate;overflow:hidden;">',
+    `<tr><td style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0;font-size:11px;line-height:16px;letter-spacing:1.1px;font-weight:800;color:#334155;">${esc(number)}. ${esc(title)}</td></tr>`,
+    `<tr><td style="padding:10px 10px 12px;">${body}</td></tr></table>`,
+  ].join('')
+  const table = (rows: string) => `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">${rows}</table>`
+  const note = (value: string) => `<p style="margin:6px 10px;color:#475569;font-size:13px;line-height:20px;">${esc(value)}</p>`
+  const validationList = `<ol style="margin:4px 0 4px 24px;padding:0;color:#334155;font-size:13px;line-height:21px;">${validationItems.map((item) => `<li style="margin:3px 0;">${esc(item)}</li>`).join('')}</ol>`
 
   const html = pageShell(
-    `${risk === 'MEDIUM' ? '🟡' : '🔴'} ${risk}-RISK REPAIR — APPROVAL REQUIRED (${incident.ref})`,
+    `${persistedRisk}-risk Repair Approval Required · ${incident.ref}`,
     accent,
     [
-      sec('A. Incident'),
-      `<table style="border-collapse:collapse;font-size:14px;">${row('Incident', `${incident.ref} · ${incident.severity}`)}${row('Timestamp', incidentTimestamp)}${row('Service', 'BuildHub API')}${row('Endpoint', `${incident.method} ${incident.endpoint}`)}${row('HTTP status', String(httpStatus))}${row('Problem', incident.title)}${row('Signature', hist?.signature)}${row('Risk', `${risk} — ${brief?.risk.reason ?? ''}`)}</table>`,
-      sec('B. Detection evidence'),
-      `<table style="border-collapse:collapse;font-size:14px;">${row('Request ID', brief?.incident.requestId ?? incident.requestId)}${row('Occurrences', hist?.occurrences != null ? String(hist.occurrences) : null)}${row('Detected by', brief?.incident.detectedBy ?? incident.detectedBy)}${row('Log', hist?.logExcerpt?.slice(0, 500))}</table>`,
-      sec('C. Root cause'),
-      `<table style="border-collapse:collapse;font-size:14px;">${row('Cause', brief?.rootCause ?? incident.expectedRootCause)}${row('File', brief?.location?.file)}${row('Line', brief?.location?.line != null ? String(brief.location.line) : null)}${row('Function', brief?.location?.function)}${row('If unfixed', lastRound?.coder.affectedBehavior)}</table>`,
-      sec('D. Coder — before / after'),
-      '<h4>Before</h4>', codeBlock(before),
-      '<h4>Proposed after</h4>', codeBlock(after),
-      `<p>${esc(`Why it fixes the problem: ${lastRound?.coder.diagnosis ?? 'n/a'} (confidence ${lastRound?.coder.confidence ?? 'n/a'})`)}</p>`,
-      sec('E. Critic — independent review by iteration'),
-      ...rounds.flatMap((r) => [
-        `<p><strong>${esc(`Iteration ${r.round} — verdict ${r.critic.verdict ?? 'n/a'}`)}</strong><br>${esc(r.critic.reasoning ?? '')}${
-          r.critic.requiredChanges.length > 0 ? `<br>Asked Coder to change: ${esc(r.critic.requiredChanges.join('; '))}` : ''
-        }${r.critic.securityConcerns.length > 0 ? `<br>Security: ${esc(r.critic.securityConcerns.join('; '))}` : ''}</p>`,
-      ]),
-      sec('F. Judge'),
-      `<p>${esc(`Decision ${judge?.decision ?? 'n/a'} → recommendation ${judgeRecommendation}. ${judge?.reasoning ?? ''}`)}</p>`,
-      sec('G. History (context only)'),
-      `<p>${esc(hist && hist.previous.length > 0 ? hist.previous.map((p) => `${p.ref}: outcome ${p.outcome ?? '?'} reward ${p.reward ?? '?'}`).join(' · ') : 'First occurrence — no previous repairs. Never blindly reuse old patches.')}</p>`,
-      sec('H. Validation plan'),
-      `<p>${esc(brief?.validationPlan ?? 'n/a')}</p><pre style="font-size:12px;">${esc(canonicalPlan)}</pre>`,
-      sec('I. Approval decision'),
-      `<div style="margin-top:14px;">${button(approveUrl, risk === 'MEDIUM' ? 'APPROVE REPAIR' : 'APPROVE HIGH-RISK REPAIR', '#15803d')}${button(rejectUrl, 'REJECT', '#b91c1c')}</div>`,
-      `<p style="color:#666;font-size:13px;">${esc(`Approval ${approvalId} · attempt ${attemptId} · expires ${expiresAt ?? 'in 5 minutes'} · one-time links, idempotent replays.`)}</p>`,
+      `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin:0 0 14px;border-collapse:separate;border-spacing:0;background:#f8fafc;border-left:4px solid ${accent};"><tr><td style="padding:12px 14px;">${table(`${row('Incident', incident.ref)}${row('Risk', persistedRisk)}${row('Problem', incident.title)}${row('Affected endpoint', `${incident.method} ${incident.endpoint}`)}${row('Approval status', approvalStatus)}`)}</td></tr></table>`,
+      section('1', 'INCIDENT', table(`${row('What happened', brief?.incident.summary ?? incident.summary ?? incident.description)}${row('HTTP status', String(httpStatus))}${row('Error', incident.errorCode ?? hist?.signature)}${row('Timestamp', incidentTimestamp)}${row('Request ID', brief?.incident.requestId ?? incident.requestId)}`)),
+      section('2', 'AI ROOT CAUSE', `${note(brief?.rootCause ?? incident.expectedRootCause ?? 'n/a')}${table(`${row('File', brief?.location?.file)}${row('Line', brief?.location?.line != null ? String(brief.location.line) : null)}${row('Function', brief?.location?.function)}`)}`),
+      section('3', 'AGENT-1 ANALYZER', table(`${row('Diagnosis summary', analyzerSummary)}${row('Evidence used', evidenceUsed)}${row('Confidence', analyzer?.confidence != null ? String(analyzer.confidence) : lastRound?.coder.confidence != null ? String(lastRound.coder.confidence) : null)}`)),
+      section('4', 'AGENT-2 CODER', `${table(`${row('Proposed fix', brief?.proposedFix)}${row('Files changed', brief?.location?.file ?? brief?.patch?.file)}${row('Why this fixes it', lastRound?.coder.diagnosis)}${row('Confidence', lastRound?.coder.confidence != null ? String(lastRound.coder.confidence) : null)}`)}<div style="margin:10px;"><div style="font-size:10px;font-weight:800;letter-spacing:1px;color:#64748b;">BEFORE</div>${codeBlock(before)}<div style="margin-top:12px;font-size:10px;font-weight:800;letter-spacing:1px;color:#64748b;">AFTER</div>${codeBlock(after)}</div>`),
+      section('5', 'AGENT-3 CRITIC', table(`${row('Independent review', lastRound?.critic.reasoning)}${row('Security concerns', securityConcerns)}${row('Regression concerns', regressionConcerns)}${row('Verdict', finalCriticVerdict)}`)),
+      section('6', 'JUDGE', table(`${row('Risk', persistedRisk)}${row('Confidence', judge?.confidence != null ? String(judge.confidence) : null)}${row('Decision', judge ? `${judge.decision} / ${judgeRecommendation}` : null)}${row('Reason', judge?.reasoning ?? brief?.risk.reason)}`)),
+      section('7', 'VALIDATION PLAN', validationList),
+      section('8', 'ROLLBACK', note(rollbackPlan)),
+      `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:16px;border:1px solid ${accent};border-radius:9px;border-collapse:separate;"><tr><td style="padding:16px 18px;"><div style="font-size:11px;line-height:16px;letter-spacing:1.3px;font-weight:800;color:#334155;">HUMAN DECISION</div><div style="margin-top:9px;">${button(approveUrl, 'APPROVE REPAIR', '#15803d')}${button(rejectUrl, 'REJECT REPAIR', '#b91c1c', true)}</div><p style="margin:10px 0 0;color:#b45309;font-size:13px;font-weight:700;">Approval expires in 5 minutes.</p><p style="margin:4px 0 0;color:#64748b;font-size:11px;line-height:17px;">${esc(`Approval ${approvalId} · attempt ${attemptId} · expires ${expiresAt ?? 'Not recorded'} · current status ${approvalStatus}. One-time, idempotent decision links.`)}</p></td></tr></table>`,
     ].join(''),
   )
 
@@ -499,6 +501,59 @@ export async function sendApprovalEmail({ incident, risk, approvalId }: Approval
   const type: NotificationType = risk === 'MEDIUM' ? 'MEDIUM_RISK_APPROVAL_REQUIRED' : 'HIGH_RISK_APPROVAL_REQUIRED'
   const built = await buildApprovalEmail({ incident, risk, approvalId })
   return sendGmail({ type, subject: built.subject, text: built.text, html: built.html, incidentId: incident.id, severity: incident.severity })
+}
+
+/** Security-incident communication built only from persisted incident,
+ * SecurityFinding, LogEvent and AgentRun rows. ESCALATION dedupe guarantees
+ * one delivered assessment per incident even when the detector retries. */
+export async function sendSecurityIncidentEmail({ incident }: { incident: Incident }): Promise<SendGmailResult> {
+  const fresh = (await prisma.incident.findUnique({ where: { id: incident.id } })) ?? incident
+  const ruleId = fresh.errorCode ?? ''
+  const [finding, runs, logs] = await Promise.all([
+    ruleId
+      ? prisma.securityFinding.findFirst({ where: { ruleId: { equals: ruleId, mode: 'insensitive' } }, orderBy: { createdAt: 'desc' } })
+      : Promise.resolve(null),
+    prisma.agentRun.findMany({ where: { incidentId: fresh.id }, orderBy: { createdAt: 'asc' } }),
+    prisma.logEvent.findMany({
+      where: { OR: [{ incidentId: fresh.id }, { errorCode: { in: ['AUTH_FAILED', 'AUTH_BURST', 'IP_BLOCKED'] } }] },
+      orderBy: { createdAt: 'asc' }, take: 80,
+    }),
+  ])
+  const suspicious = finding?.hitCount ?? logs.filter((row) => row.errorCode === 'AUTH_FAILED').length
+  const blocked = logs.filter((row) => row.errorCode === 'IP_BLOCKED')
+  const mitigation = blocked.length > 0
+    ? `Temporary source-IP block/rate limit rejected ${blocked.length} request${blocked.length === 1 ? '' : 's'}.`
+    : (finding?.detail ?? 'No mitigation record was persisted.')
+  const agentSummary = runs.length
+    ? runs.map((run) => `${run.kind ?? run.agent}: ${run.status} — ${run.outputSummary ?? run.error ?? 'no summary recorded'}`).join('\n')
+    : 'No AI/security agent run was persisted.'
+  const outcome = blocked.length > 0 ? 'Attack traffic contained; the service continued responding.' : fresh.status.replaceAll('_', ' ')
+  const subject = `[BuildHub][SECURITY][${fresh.severity}] Attack detected — ${fresh.ref}`
+  const text = [
+    'BUILDHUB SECURITY INCIDENT', '',
+    `Incident: ${fresh.ref}`, `Attack detected: ${fresh.title}`,
+    `Target endpoint: ${fresh.method} ${fresh.endpoint}`,
+    `Pattern: ${finding?.ruleId ?? fresh.errorCode ?? 'security anomaly'} — ${finding?.detail ?? fresh.description}`,
+    `Suspicious requests: ${suspicious}`, `Evidence: ${logs.slice(-8).map((row) => `${row.createdAt.toISOString()} ${row.errorCode ?? row.level} ${row.message}`).join(' | ') || fresh.description}`,
+    `Detection / analyzer: ${fresh.detectedBy ?? 'BuildHub monitoring'} · ${finding?.title ?? fresh.title}`,
+    `Risk / severity: ${fresh.severity} · score ${fresh.riskScore}/100`,
+    `Mitigation performed: ${mitigation}`,
+    `Service health before / after: attack evidence persisted; current service response remained available unless the incident record states otherwise.`,
+    '', 'AI / SECURITY AGENT SUMMARIES', agentSummary,
+    '', `Final outcome: ${outcome}`,
+  ].join('\n')
+  const html = pageShell(
+    `Security incident · ${fresh.ref}`,
+    '#b91c1c',
+    [
+      `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">${row('Incident', fresh.ref)}${row('Attack detected', fresh.title)}${row('Target endpoint', `${fresh.method} ${fresh.endpoint}`)}${row('Pattern', `${finding?.ruleId ?? fresh.errorCode ?? 'security anomaly'} · ${finding?.detail ?? fresh.description}`)}${row('Suspicious requests', String(suspicious))}${row('Detection', fresh.detectedBy)}${row('Risk / severity', `${fresh.severity} · score ${fresh.riskScore}/100`)}${row('Mitigation', mitigation)}${row('Service response', outcome)}${row('Final outcome', outcome)}</table>`,
+      '<div style="margin-top:16px;font-size:11px;line-height:16px;letter-spacing:1px;font-weight:800;color:#334155;">AI / SECURITY AGENT SUMMARIES</div>',
+      codeBlock(agentSummary),
+      '<div style="margin-top:16px;font-size:11px;line-height:16px;letter-spacing:1px;font-weight:800;color:#334155;">EVIDENCE</div>',
+      codeBlock(logs.slice(-12).map((entry) => `${entry.createdAt.toISOString()} ${entry.errorCode ?? entry.level} ${entry.message}`).join('\n') || fresh.description),
+    ].join(''),
+  )
+  return sendGmail({ type: 'ESCALATION', subject, text, html, incidentId: fresh.id, severity: fresh.severity })
 }
 
 export interface FinalEmailInput {

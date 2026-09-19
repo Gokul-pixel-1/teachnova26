@@ -1,6 +1,6 @@
 # Phase 9 — Fault Test Plan
 
-> Exact fault definitions for the 9 controlled failure scenarios (3 LOW, 3 MEDIUM, 3 HIGH).
+> Exact fault definitions for the controlled failure scenarios (3 LOW, 3 MEDIUM, 3 HIGH, plus LOW-04 and COMMENT-01 on the comment creation surface).
 > Each fault is injected at a specific file:line, triggered by a specific API call,
 > and validated by the self-healing system.
 
@@ -97,6 +97,31 @@ BuildHub App
 | **Validation** | `POST /api/posts` with 50-char content → 201 |
 | **Rollback** | Restore original min value |
 | **Cleanup** | Remove fault, verify original behavior |
+
+### COMMENT-01: Comment Creation Service Failure ("Cannot Comment")
+
+| Property | Value |
+|----------|-------|
+| **Scenario ID** | COMMENT-01 |
+| **Difficulty** | EASY |
+| **Target Component** | Comment Creation API |
+| **File** | `frontend/app/api/posts/[id]/comments/route.ts` |
+| **Line** | ~87 |
+| **Function** | `POST` handler |
+| **Original Code** | `prisma.comment.create({ data: { content, postId: id, authorId: user.id } })` |
+| **Fault** | `throw new Error('COMMENT-01: Injected comment service failure')` before create (runtime guard `isFaultActive('COMMENT-01')`, no source change) |
+| **Trigger** | `POST /api/posts/[id]/comments` with valid content (authenticated) |
+| **Expected Error** | `500: Internal Server Error` (structured error/log via `handleRouteError`) |
+| **Expected Normal Behavior** | Fault inactive → real Prisma/database comment creation → `201` with `{ comment: { id, ... } }`, correct author + post association |
+| **Risk/Severity** | LOW — single comment endpoint, isolated surface, no security impact (autonomous repair; Judge still rates the real patch) |
+| **AI Expected Fix** | Restore normal runtime behavior (deactivate fault); repair must restore the genuine comment database operation, never fake success |
+| **Validation (probe)** | Fault active → `POST` comment fails; after repair → `201`, real comment id, comment exists in PostgreSQL with correct author/post, no new server error + regression checks |
+| **Activation** | `POST /api/faults {faultId: COMMENT-01}` (requires `FAULT_INJECTION_ENABLED=true`) |
+| **Deactivation** | `POST /api/faults/deactivate {faultId: COMMENT-01}` or engine runtime restore; `deactivate-all` clears every guard |
+| **Rollback** | Re-activate fault on validation failure → incident `ROLLED_BACK` + negative reward, never `RESOLVED` on failed validation |
+| **Cleanup** | Deactivate fault, verify normal comment creation |
+
+> COMMENT-01 shares the comment creation surface with LOW-04 (same trigger endpoint, same guard location) but runs under its own scenario id for Demo 3 ("Cannot Comment"). No parallel fault framework was introduced: activation, registry, severity mapping, risk policy, validation probes, and repair memory all reuse the existing engine.
 
 ---
 
@@ -248,6 +273,8 @@ BuildHub App
 | LOW-01 | LOW | No | Yes | Yes | Yes |
 | LOW-02 | LOW | No | Yes | Yes | Yes |
 | LOW-03 | LOW | No | Yes | Yes | Yes |
+| LOW-04 | LOW | No | Yes | Yes | Yes |
+| COMMENT-01 | LOW | No | Yes | Yes | Yes |
 | MEDIUM-01 | MEDIUM | No | Yes | Yes | Yes |
 | MEDIUM-02 | MEDIUM | No | Yes | Yes | Yes |
 | MEDIUM-03 | MEDIUM | No | Yes | Yes | Yes |

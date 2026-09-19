@@ -8,7 +8,7 @@ export const metadata: Metadata = {
 
 export default function AiOverviewPage() {
   return (
-    <div className="mx-auto w-full max-w-6xl">
+    <div className="mx-auto w-full min-w-0 max-w-7xl overflow-hidden">
       <OverviewClient />
     </div>
   )

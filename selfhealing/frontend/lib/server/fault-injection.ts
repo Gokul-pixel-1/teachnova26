@@ -72,9 +72,12 @@ export interface FaultConfig {
   active: boolean
 }
 
-// Fault registry — all 9 defined faults. `wired` marks the runtime faults
+// Fault registry — all defined faults. `wired` marks the runtime faults
 // implemented by real handler guards; `active` reflects the durable runtime
 // state (never source state).
+// COMMENT-01 is the demo-canonical "Cannot Comment" fault: same comment
+// creation surface as LOW-04, dedicated id so the comment self-healing demo
+// (Demo 3) runs under its own scenario definition.
 export const FAULT_REGISTRY: Record<string, FaultConfig> = {
   'LOW-01': {
     id: 'LOW-01',
@@ -161,6 +164,28 @@ export const FAULT_REGISTRY: Record<string, FaultConfig> = {
     riskLevel: 'LOW',
     riskReason: 'Single comment endpoint, isolated surface, no security impact',
     thrownMessage: 'Injected comment failure',
+    aiExpectedFix: 'Restore normal runtime behavior (deactivate fault)',
+    validation: 'POST /api/posts/[id]/comments → 201, comment created',
+    rollback: 'Deactivate runtime fault → handler returns to normal behavior',
+    active: false,
+  },
+  'COMMENT-01': {
+    id: 'COMMENT-01',
+    name: 'Comment creation service failure',
+    difficulty: 'EASY',
+    wired: true,
+    runtimeBehavior:
+      'POST /api/posts/[id]/comments throws a controlled Error("COMMENT-01: Injected comment service failure") while active (500).',
+    target: {
+      file: 'app/api/posts/[id]/comments/route.ts',
+      line: 87,
+      function: 'POST handler',
+    },
+    trigger: { method: 'POST', endpoint: '/api/posts/[id]/comments' },
+    expectedError: '500: Internal Server Error',
+    riskLevel: 'LOW',
+    riskReason: 'Single comment endpoint, isolated surface, no security impact',
+    thrownMessage: 'COMMENT-01: Injected comment service failure',
     aiExpectedFix: 'Restore normal runtime behavior (deactivate fault)',
     validation: 'POST /api/posts/[id]/comments → 201, comment created',
     rollback: 'Deactivate runtime fault → handler returns to normal behavior',

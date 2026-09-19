@@ -338,7 +338,8 @@ export function LearningClient() {
                   </span>
                 </div>
                 {learning.evaluation.buckets.length > 0 && (
-                  <table className="mt-2 w-full min-w-[420px] text-left">
+                  <div className="mt-2 max-w-full overflow-x-auto">
+                  <table className="w-full min-w-[420px] text-left">
                     <thead>
                       <tr className="border-b border-bh-line text-[11px] uppercase tracking-wider text-bh-faint">
                         <th className="py-2 font-medium">Bucket (risk|severity|type)</th>
@@ -365,6 +366,7 @@ export function LearningClient() {
                       ))}
                     </tbody>
                   </table>
+                  </div>
                 )}
               </div>
             </Card>
@@ -400,7 +402,7 @@ export function LearningClient() {
                     {exp.reward > 0 ? `+${exp.reward}` : exp.reward}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-bh-ink">
+                    <p className="truncate text-sm font-medium text-bh-ink">
                       <span className="font-mono text-xs text-bh-faint">{exp.incidentRef}</span>
                       <span className="mx-2 text-bh-line-strong">/</span>
                       {exp.endpoint ?? '—'}

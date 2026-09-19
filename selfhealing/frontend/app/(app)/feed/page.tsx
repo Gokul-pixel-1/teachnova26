@@ -15,20 +15,19 @@ export default function FeedPage() {
   const feed = useAsync(() => getPosts())
 
   return (
-    <div className="mx-auto max-w-2xl">
-      {user && (
-        <div className="mb-5 flex items-center gap-3">
-          <Avatar name={user.name} username={user.username} size={44} />
-          <div>
-            <h1 className="text-xl font-semibold text-bh-ink">
-              Welcome back, {user.name.split(' ')[0]}
-            </h1>
-            <p className="text-sm text-bh-muted">
-              Here’s what’s happening in your developer community.
-            </p>
-          </div>
+    <div className="mx-auto max-w-3xl">
+      <div className="mb-6 flex items-start gap-3 border-b border-bh-line pb-5">
+        {user && <Avatar name={user.name} username={user.username} size={44} />}
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-bh-accent">Community feed</p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight text-bh-ink">
+            {user ? `Welcome back, ${user.name.split(' ')[0]}` : 'What the community is building'}
+          </h1>
+          <p className="mt-1 text-sm text-bh-muted">
+            Follow projects, share progress, and exchange practical feedback.
+          </p>
         </div>
-      )}
+      </div>
 
       <PostComposer onCreated={feed.refetch} />
 

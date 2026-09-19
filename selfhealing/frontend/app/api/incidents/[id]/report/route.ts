@@ -6,6 +6,7 @@ import { logger } from '@/lib/server/logger'
 import { prisma } from '@/lib/server/db'
 import { fetchIncidentDetail, computeOverview } from '@/lib/server/observability'
 import { generateIncidentReport } from '@/lib/server/report'
+import { buildIncidentBrief } from '@/lib/server/notifications/brief'
 
 // Authenticated PDF report endpoint. Returns `application/pdf` for a single
 // incident: observed facts + real Groq pipeline analysis + Telegram delivery
@@ -28,23 +29,48 @@ export async function POST(
 
   try {
     const overview = await computeOverview()
-    const telegramRows = await prisma.telegramNotification.findMany({
-      where: { incidentId: id },
-      orderBy: { createdAt: 'desc' },
-      take: 10,
-    })
+    const [brief, telegramRows, gmailRows, securityRows] = await Promise.all([
+      buildIncidentBrief(id),
+      prisma.telegramNotification.findMany({ where: { incidentId: id }, orderBy: { createdAt: 'asc' }, take: 30 }),
+      prisma.gmailNotification.findMany({ where: { incidentId: id }, orderBy: { createdAt: 'asc' }, take: 30 }),
+      detail.errorCode
+        ? prisma.securityFinding.findMany({
+            where: { ruleId: { equals: detail.errorCode, mode: 'insensitive' } },
+            orderBy: { createdAt: 'desc' },
+            take: 5,
+          })
+        : Promise.resolve([]),
+    ])
     const pdf = await generateIncidentReport({
       detail,
       overview,
       generatedAt: new Date().toISOString(),
-      alerts: telegramRows.map((row) => ({
+      brief,
+      telegram: telegramRows.map((row) => ({
         id: row.id,
         type: row.type,
         severity: row.severity,
         deliveryStatus: row.deliveryStatus,
-        telegramMessageId: row.telegramMessageId,
+        externalMessageId: row.telegramMessageId,
         error: row.error,
         createdAt: row.createdAt.toISOString(),
+      })),
+      gmail: gmailRows.map((row) => ({
+        id: row.id,
+        type: row.type,
+        severity: row.severity,
+        deliveryStatus: row.deliveryStatus,
+        externalMessageId: row.gmailMessageId,
+        error: row.error,
+        createdAt: row.createdAt.toISOString(),
+      })),
+      securityEvidence: securityRows.map((row) => ({
+        ruleId: row.ruleId,
+        title: row.title,
+        detail: row.detail,
+        hitCount: row.hitCount,
+        firstSeenAt: row.firstSeenAt.toISOString(),
+        lastSeenAt: row.lastSeenAt.toISOString(),
       })),
     })
 

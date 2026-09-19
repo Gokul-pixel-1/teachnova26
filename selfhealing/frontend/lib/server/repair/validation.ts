@@ -8,6 +8,7 @@ import 'server-only'
 
 import type { Incident } from '@prisma/client'
 import { randomUUID } from 'node:crypto'
+import { prisma } from '@/lib/server/db'
 
 const BASE_URL = (process.env.APP_URL ?? 'http://localhost:3000').replace(/\/$/, '')
 const DEMO_PASSWORD = process.env.DEMO_PASSWORD ?? 'buildhub-demo1'
@@ -144,8 +145,21 @@ export async function runValidationProbes(incident: Incident): Promise<ProbeResu
       body: { content: `Validation replay comment ${Date.now()}.` },
     })
     const parsed = jsonOf<{ comment?: { id: string } }>(res)
-    const ok = res.status === 201 && !!parsed?.comment?.id
-    return [result('Comment creation succeeds', 'POST', `/api/posts/${postId}/comments`, '201 (comment created)', `${res.status}`, ok)]
+    const commentId = parsed?.comment?.id ?? null
+    const created = commentId
+      ? await prisma.comment.findUnique({ where: { id: commentId }, select: { id: true, postId: true, authorId: true } })
+      : null
+    const createdOk = res.status === 201 && created?.id === commentId
+    const postOk = created?.postId === postId
+    const author = created
+      ? await prisma.user.findUnique({ where: { id: created.authorId }, select: { username: true } })
+      : null
+    const authorOk = author?.username === 'arjun'
+    return [
+      result('Comment creation succeeds', 'POST', `/api/posts/${postId}/comments`, '201 and persisted comment', `${res.status}${commentId ? ` · ${commentId}` : ''}`, createdOk),
+      result('Comment belongs to the correct post', 'DB', 'comments.postId', postId, created?.postId ?? 'missing', postOk),
+      result('Comment belongs to the authenticated author', 'DB', 'comments.authorId', 'arjun', author?.username ?? 'missing', authorOk),
+    ]
   }
 
   switch (`${method} ${endpoint}`) {
