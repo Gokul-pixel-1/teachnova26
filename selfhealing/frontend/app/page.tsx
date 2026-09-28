@@ -52,10 +52,10 @@ export default function LandingPage() {
             ))}
           </nav>
           <div className="hidden items-center gap-2 md:flex">
-            <Link href="/login">
+            <Link href="/login" data-ux-id="landing-login">
               <Button variant="ghost" size="sm">Log in</Button>
             </Link>
-            <Link href="/signup">
+            <Link href="/signup" data-ux-id="landing-get-started">
               <Button size="sm">Get started</Button>
             </Link>
           </div>
@@ -113,10 +113,10 @@ export default function LandingPage() {
                 feedback from a community that cares about the details.
               </p>
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-                <Link href="/signup">
+                <Link href="/signup" data-ux-id="landing-hero-start">
                   <Button size="lg" className="w-full sm:w-auto">Start building — it’s free</Button>
                 </Link>
-                <Link href="/projects">
+                <Link href="/projects" data-ux-id="landing-hero-explore">
                   <Button size="lg" variant="outline" className="w-full sm:w-auto">Explore projects</Button>
                 </Link>
               </div>

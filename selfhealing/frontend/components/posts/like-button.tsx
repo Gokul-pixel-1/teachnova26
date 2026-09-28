@@ -62,6 +62,7 @@ export function LikeButton({
   return (
     <button
       type="button"
+      data-ux-id="like-button"
       onClick={toggle}
       aria-pressed={likedState}
       aria-label={likedState ? 'Unlike post' : 'Like post'}

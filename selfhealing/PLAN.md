@@ -2630,3 +2630,73 @@ Follow-up: added a complete physical `COMMENT_FAILURE_ROUTE.ts` drop-in fixture
 and refreshed the normal feed heading/layout. Health remains database-derived
 from persisted incidents/log events and current component probes; no startup
 counter or in-memory health store exists to reset.
+
+### 2026-09-24 — UX Suggestion Agent (behaviour-driven, always human-approved)
+
+Changed (additive; the bug-repair pipeline is untouched — `lib/server/repair/*`, `app/api/approvals/*`, `Incident/Approval/ApprovalToken/RepairAttempt/PatchRecord` have zero diffs):
+- Behaviour capture: `components/ux/behavior-tracker.tsx` (mounted in `app/layout.tsx`) records anonymous interaction shape only — TARGET_CLICK (+ time to find), DEAD_CLICK (empty-space click attributed to the nearest `[data-ux-id]` element + side), RAGE_CLICK — batched to public `POST /api/ux/events` (zod-validated, registry-filtered). Not recorded on `/ai/*`.
+- Tracked components: `lib/server/ux/registry.ts` (uxId → file → probe page); `data-ux-id` attributes added to header Log in/Sign up, landing Log in/Get started, Publish, Post comment, Like.
+- Analysis (`lib/server/ux/behavior.ts`, the UI counterpart of the log monitor): per-component friction = 2·dead + 3·rage + 2·slow finds (≥ `UX_SLOW_FIND_MS`); flagged at score ≥ `UX_FRICTION_MIN_SCORE` (12) from ≥ `UX_FRICTION_MIN_SESSIONS` (3) struggling sessions. Debounced background run after ingest drafts a suggestion AUTOMATICALLY (`UX_AUTO_SUGGEST`), serialized, one open suggestion per component, counting restarts at the last decision, 10-min cooldown after a failed draft.
+- Draft (`lib/server/ux/draft.ts`): real Groq with a UX-reviewer prompt given the evidence + side users expected; strict full-anchor check, data-ux-id must survive, one corrective retry. Deterministic offline draft in TEST mode.
+- ALWAYS approval: `UxApproval` + one-time `UxApprovalToken` + Gmail email (`UX_SUGGESTION_APPROVAL_REQUIRED`, shows the behaviour evidence) — no risk tier, no auto-apply path. TTL `UX_APPROVAL_TTL_MINUTES` (30).
+- Apply (`lib/server/ux/apply.ts`): only from `/api/ux/approvals/{email,proceed}`; indentation-preserving anchored patch, SHA-256 backup, external write, probe of the component's page (<500) else byte-restore rollback.
+- Dashboard `/ai/ux-suggestions`: live friction per component, AUTO/MANUAL suggestions with the "why", Approve/Reject, "Analyze behaviour now", optional manual request.
+- Schema: migrations `20260924144557_ux_suggestion_agent` (also caught up pre-existing documented drift: AgentName.ANALYZER, IncidentStatus.VALIDATING, patch_records SHA columns, log_events stack columns — additive, no data loss) and `20260924160757_ux_behavior_events`.
+- Scripts: `scripts/verify-ux-suggestions.mjs` (TEST mode), `scripts/simulate-ux-struggle.mjs`.
+
+Validation:
+- `npx tsc --noEmit`: only the 3 pre-existing unreachable-code notes in the intentional LOW-01 `app/api/posts/route.ts` demo; eslint clean on all touched paths.
+- `node scripts/verify-ux-suggestions.mjs` (TEST mode): 33/33.
+- Live REAL Groq (`qwen/qwen3.8-27b`): 3 headless-Chrome visitors struggling to find header "Log in" → tracker events → automatic UX-000009 AWAITING_APPROVAL with correct evidence; earlier UX-000008 approved → applied → /projects 200 → VALIDATED (then reverted for the demo).
+- Live bug pipeline in the same server: POST /api/posts 500 (intentional LOW-01) → INC-00001 → ANALYZER/CODER/CRITIC/JUDGE all COMPLETE, correct root cause → MEDIUM → WAITING_APPROVAL → REJECTED (demo bug intentionally left intact).
+- NOT run: `verify-self-healing.mjs` / `verify-gmail-approval.mjs` (blocked by the local permission policy as they write/roll back source files; they also use Linux `ss` for server restarts).
+- Gmail: not configured in this environment (no GMAIL_* values) — sends are recorded honestly as FAILED; dashboard Approve/Reject exercise the identical apply path.
+
+### 2026-09-27 — UX sandbox (test environment) + richer behaviour evidence
+
+Changed (additive; bug-repair pipeline has zero diffs):
+- Evidence: tracker records the click offset from the element's centre (dx/dy + size) and picks the side by the dominant axis (left/right/up/down); attribution prefers tracked elements in the same row as the click. Analyser adds `direction` up/down, a median `hotspot`, and per-click "expectations". Migration `20260927…_ux_sandbox_trials` (ux_events dx/dy/targetW/targetH, ux_suggestions.sandbox) — additive.
+- 6 more tracked components (13 total): sidebar Log in/Sign up, projects search + status filter, landing hero Start building/Explore. Registry gains simPath/auth.
+- Sandbox (`lib/server/ux/sandbox.ts`): separate copy of the frontend in ~/buildhub-sandbox/frontend, own `next dev --webpack` on :3100 (Turbopack rejects the node_modules junction), minimal hand-built env (no Gmail/Groq/Telegram secrets), UX_SANDBOX_MODE makes its event endpoint ignore everything. Incremental source sync.
+- Simulation (`lib/server/ux/simulate.ts`, puppeteer-core + local Chrome): each real struggle click becomes a simulated user; checks per candidate: page loads, visible, clickable, ≥24px, no page overflow, no overlap, no duplicate control, misclick (would the click hit ANOTHER control), found-in-looked-area rate (≥60%), distance improvement (≥50%), Fitts-based predicted find time; screenshots with red dots (expected clicks) + green box.
+- Trial loop (`lib/server/ux/trial.ts`): up to UX_SIM_MAX_ROUNDS placements; failed rounds feed measured positions/misclicks back to the drafter; never repeats a tried placement. Engine: SIMULATING → AWAITING_APPROVAL (only a passing placement is emailed) | NO_EASY_PLACEMENT | SANDBOX_FAILED; stale trials expire; "Re-test in sandbox" (fresh ideas only). Email + dashboard show rounds, metrics and before/after screenshots.
+- `scripts/simulate-ux-struggle.mjs` now drives real headless Chrome (any component, any side).
+
+Validation:
+- `verify-ux-suggestions.mjs` (TEST mode): 41/41 (pass path, misclick NO_EASY_PLACEMENT path, retest, screenshots, approve/reject/expiry/invalid, header restored byte-for-byte).
+- Live REAL Groq: real-Chrome users → UX-000015: round 1 (restyle only, did not move) rejected; round 2 passed → operator approved by email → VALIDATED. The misclick check (added after) would have rejected that layout (users' clicks landed on Sign up): UX-000016 caught it (18/18 misclicks), a later candidate that duplicated the button was rejected, and UX-000017 (Log in moved out of the group, Sign up stays right) passed 18/18, 0 misclicks, 95% closer → approved → VALIDATED, live.
+- tsc (only the 3 pre-existing LOW-01 demo notes) and eslint clean on all touched paths.
+
+## 2026-09-27 — Old + new pipelines verified together
+
+- `app/api/posts/route.ts`: the LOW-01 demo `throw` (made unconditional in the
+  "final" commit, so POST /api/posts always returned 500) is guarded by
+  `isFaultActive('LOW-01')` again — posting works; the fault still fires when
+  activated from the Command Center.
+- `lib/server/logger.ts`: throttled auto-scan now schedules one trailing scan,
+  so a 500 inside the 8 s window still opens/merges an incident.
+- `lib/server/ux/engine.ts`: first UX draft waits + retries on Groq 429.
+- `scripts/verify-self-healing.mjs`: expects 11 faults (COMMENT-01 added).
+  It still uses Linux-only `ss`/`npx` restarts; on Windows use
+  `scripts/verify-repair-flow.mjs` (LOW-01 auto-repair, HIGH-01 approval).
+- Result (TEST mode, run in parallel): verify-repair-flow 15/15,
+  verify-ux-suggestions 41/41.
+
+## 2026-09-28 — Jira approval channel (both pipelines)
+
+- Human approvals now go to Jira (project KAN) instead of email, for bug repairs
+  (MEDIUM/HIGH) and UX suggestions. The card waits in "In Review".
+  Done / comment "approve" approves; To Do / "reject" rejects. BuildHub polls
+  (localhost has no webhook), decides with the same approval functions as the
+  dashboard, comments the result and moves the card. Falls back to email if
+  Jira is unreachable. See frontend/JIRA_APPROVALS.md.
+- New: lib/server/jira/{client,approvals}.ts, instrumentation.ts (poller),
+  /api/jira/{status,sync,links}, model JiraApproval (migration
+  *_jira_approvals), scripts/{mock-jira,verify-jira-approval,jira-setup}.mjs.
+  The UX card shows before/after sandbox screenshots.
+- Hooks: repair/engine.ts notifyApprovalEmail (+30-min TTL on the Jira
+  channel), ux/engine.ts offerForApproval. Dashboard links to the Jira card.
+- TEST mode only talks to a localhost Jira (mock). Results: verify-jira-approval
+  44/44; verify-repair-flow 15/15 and verify-ux-suggestions 41/41 (Jira) and
+  15/15, 42/42 (email).
+- Pending: the real Jira API token, entered by the user via jira-setup.mjs.

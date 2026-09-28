@@ -5,6 +5,7 @@ import { resolve } from 'node:path'
 import { requireSecurityOperator } from '@/lib/server/security'
 import { errorResponse, handleApiError } from '@/lib/server/response'
 import { logger } from '@/lib/server/logger'
+import { buildGmailConsentUrl } from '@/lib/server/gmail-oauth'
 
 // Phase 12 — secure one-time OAuth code exchange (operator-gated).
 //
@@ -18,17 +19,6 @@ import { logger } from '@/lib/server/logger'
 // On success: { ok:true } — the ONLY success text is
 // "Refresh token obtained successfully."
 // On expired/consumed code: 410 + a fresh consentUrl to re-authorize.
-
-function consentUrl(clientId: string, redirectUri: string, scopes: string): string {
-  const url = new URL('https://accounts.google.com/o/oauth2/v2/auth')
-  url.searchParams.set('client_id', clientId)
-  url.searchParams.set('redirect_uri', redirectUri)
-  url.searchParams.set('response_type', 'code')
-  url.searchParams.set('scope', scopes)
-  url.searchParams.set('access_type', 'offline')
-  url.searchParams.set('prompt', 'consent')
-  return url.toString()
-}
 
 export async function POST(request: Request) {
   const guard = await requireSecurityOperator()
@@ -52,7 +42,6 @@ export async function POST(request: Request) {
     const clientId = process.env.GMAIL_CLIENT_ID?.trim() ?? ''
     const clientSecret = process.env.GMAIL_CLIENT_SECRET?.trim() ?? ''
     const redirectUri = process.env.GMAIL_REDIRECT_URI?.trim() ?? ''
-    const scopes = process.env.GMAIL_OAUTH_SCOPES?.trim() || 'https://www.googleapis.com/auth/gmail.send'
     const missing = [!clientId && 'GMAIL_CLIENT_ID', !clientSecret && 'GMAIL_CLIENT_SECRET', !redirectUri && 'GMAIL_REDIRECT_URI'].filter(Boolean)
     if (missing.length > 0) {
       return errorResponse(`Gmail OAuth setup incomplete (missing ${missing.join(', ')}).`, 409)
@@ -112,7 +101,7 @@ export async function POST(request: Request) {
             ? `${detail} Authorization code expired or already used. Re-authorize with the fresh consentUrl below, then exchange the NEW code once.`
             : detail,
           redirectUri,
-          consentUrl: expired || mismatch ? consentUrl(clientId, redirectUri, scopes) : undefined,
+          consentUrl: expired || mismatch ? buildGmailConsentUrl() : undefined,
         },
         { status: expired || mismatch ? 410 : 502 },
       )

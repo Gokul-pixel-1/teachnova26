@@ -9,6 +9,13 @@ const nextConfig: NextConfig = {
   turbopack: {
     root: __dirname,
   },
+  // The Gmail OAuth callback URL carries a one-time authorization code in its
+  // query string; keep it out of the dev request log.
+  logging: {
+    incomingRequests: {
+      ignore: [/\/api\/gmail\/oauth\/callback/],
+    },
+  },
 };
 
 export default nextConfig;

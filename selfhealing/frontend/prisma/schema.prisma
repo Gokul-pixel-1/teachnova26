@@ -215,6 +215,12 @@ enum NotificationType {
   // Terminal incident summary (canonical, built from persisted observability
   // facts). One per incident regardless of how the incident ended.
   FINAL_SUMMARY
+  // — UX Suggestion Agent — additive values for the always-approval UI/UX
+  // improvement flow (lib/server/ux/*). Parallel to, and independent of, the
+  // bug-repair notification types above.
+  UX_SUGGESTION_APPROVAL_REQUIRED
+  UX_SUGGESTION_APPLIED
+  UX_SUGGESTION_REJECTED
 }
 
 model SecurityFinding {
@@ -580,4 +586,150 @@ model RepairExperience {
   @@index([incidentId])
   @@index([terminal])
   @@map("repair_experiences")
+}
+
+// ---------------------------------------------------------------------------
+// UX Suggestion Agent — proactive UI/UX improvement proposals for any named
+// component. Deliberately NOT built on Incident/Approval/ApprovalToken: those
+// require a real bug-shaped incident (non-null severity/endpoint/method) and
+// the bug-repair engine auto-applies LOW/MEDIUM risk, whereas every UX
+// suggestion must ALWAYS go through human email approval with zero
+// auto-apply path. Fully additive, parallel tables — the bug-repair pipeline
+// (Incident/Approval/ApprovalToken/RepairAttempt/PatchRecord and everything
+// built on them) is untouched by this section.
+// ---------------------------------------------------------------------------
+
+model UxSuggestion {
+  id               String    @id @default(cuid())
+  // Deterministic, human-facing reference (UX-000007).
+  ref              String    @unique
+  // DRAFTED | AWAITING_APPROVAL | APPLIED | VALIDATED | REJECTED | ROLLED_BACK | EXPIRED
+  status           String    @default("DRAFTED")
+  component        String
+  file             String
+  instruction      String
+  summary          String?
+  line             Int?
+  function         String?
+  currentCode      String
+  proposedCode     String
+  originalContent  String?
+  appliedContent   String?
+  restoredContent  String?
+  originalSha256   String?
+  appliedSha256    String?
+  restoredSha256   String?
+  validationResult String?
+  model            String?
+  // Registry id of the tracked component (data-ux-id), when known.
+  uxId             String?
+  // AUTO = raised by behaviour analysis; MANUAL = requested by an operator.
+  source           String    @default("MANUAL")
+  // Behaviour evidence that justified an AUTO suggestion (counts, sides, timings).
+  evidence         Json?
+  // Sandbox usability trials run before approval (rounds, metrics, screenshots).
+  sandbox          Json?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  appliedAt        DateTime?
+  rolledBackAt     DateTime?
+  approvals        UxApproval[]
+
+  @@index([status])
+  @@index([uxId])
+  @@map("ux_suggestions")
+}
+
+// Anonymous UI interaction signals captured by components/ux/behavior-tracker.tsx.
+// Only interaction shape is stored (which tracked element, where the click
+// landed relative to it, how long it took to find) — never typed text, never
+// identity. Analysed by lib/server/ux/behavior.ts.
+model UxEvent {
+  id          String   @id @default(cuid())
+  sessionId   String
+  // TARGET_CLICK | DEAD_CLICK | RAGE_CLICK
+  type        String
+  uxId        String?
+  path        String
+  x           Int?
+  y           Int?
+  viewportW   Int?
+  viewportH   Int?
+  // LEFT | RIGHT | ABOVE | BELOW — where a dead click landed relative to uxId.
+  side        String?
+  // Click offset from the element's centre (px) and the element's size at the
+  // time — layout- and scroll-independent "where users expected it".
+  dx          Int?
+  dy          Int?
+  targetW     Int?
+  targetH     Int?
+  msSinceLoad Int?
+  createdAt   DateTime @default(now())
+
+  @@index([uxId, createdAt])
+  @@index([createdAt])
+  @@index([sessionId])
+  @@map("ux_events")
+}
+
+// Mirrors Approval's shape for a UxSuggestion instead of an Incident. Reuses
+// the existing generic ApprovalStatus enum (no bug-repair coupling).
+model UxApproval {
+  id              String         @id @default(cuid())
+  uxSuggestionId  String
+  uxSuggestion    UxSuggestion   @relation(fields: [uxSuggestionId], references: [id], onDelete: Cascade)
+  // Deterministic, human-facing reference (UXA-921465).
+  approvalId      String         @unique
+  status          ApprovalStatus @default(PENDING)
+  operator        String
+  createdAt       DateTime       @default(now())
+  expiresAt       DateTime
+  statusUpdatedAt DateTime       @updatedAt
+  tokens          UxApprovalToken[]
+
+  @@index([uxSuggestionId])
+  @@index([approvalId])
+  @@index([status])
+  @@map("ux_approvals")
+}
+
+// Mirrors ApprovalToken's shape (SHA-256 hashed, single-use, APPROVE|REJECT)
+// for a UxApproval instead of an Approval.
+model UxApprovalToken {
+  id           String     @id @default(cuid())
+  uxApprovalId String
+  uxApproval   UxApproval @relation(fields: [uxApprovalId], references: [id], onDelete: Cascade)
+  tokenHash    String     @unique
+  action       String
+  expiresAt    DateTime
+  usedAt       DateTime?
+  createdAt    DateTime   @default(now())
+
+  @@index([uxApprovalId])
+  @@index([expiresAt])
+  @@map("ux_approval_tokens")
+}
+
+// Jira approval channel: one Jira issue per human decision (bug-repair
+// Approval "APR-…" or UX approval "UXA-…"). BuildHub polls the issue; moving
+// it to the approve/reject status (or commenting "approve"/"reject") decides
+// the linked approval exactly like the dashboard or an email link would.
+model JiraApproval {
+  id           String    @id @default(cuid())
+  kind         String // REPAIR | UX
+  approvalId   String    @unique
+  issueKey     String?
+  issueUrl     String?
+  state        String    @default("OPEN") // OPEN | APPROVED | REJECTED | EXPIRED | CLOSED | ERROR
+  lastStatus   String?
+  decidedBy    String?
+  outcome      String?
+  error        String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  decidedAt    DateTime?
+
+  @@index([state])
+  @@index([issueKey])
+  @@map("jira_approvals")
 }

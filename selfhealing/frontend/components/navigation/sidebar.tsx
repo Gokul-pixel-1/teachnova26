@@ -73,10 +73,10 @@ export function Sidebar() {
         {guest ? (
           <div className="mt-3 space-y-2">
             <Button asChild variant="primary" size="sm" className="w-full">
-              <Link href="/login">Log in</Link>
+              <Link href="/login" data-ux-id="sidebar-login">Log in</Link>
             </Button>
             <Button asChild variant="outline" size="sm" className="w-full">
-              <Link href="/signup">Sign up</Link>
+              <Link href="/signup" data-ux-id="sidebar-signup">Sign up</Link>
             </Button>
           </div>
         ) : (

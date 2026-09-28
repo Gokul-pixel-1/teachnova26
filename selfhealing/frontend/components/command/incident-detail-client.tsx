@@ -68,6 +68,23 @@ export function IncidentDetailClient({ id }: { id: string }) {
   const pendingApprovals =
     incident?.approvals.filter((a) => a.status === 'PENDING' && a.decision === null) ?? []
 
+  // Jira cards for pending approvals (when the Jira approval channel is on).
+  const pendingKey = pendingApprovals.map((a) => a.approvalId).join(',')
+  const [jiraLinks, setJiraLinks] = useState<Record<string, { issueKey: string | null; issueUrl: string | null }>>({})
+  useEffect(() => {
+    if (!pendingKey) return
+    let cancelled = false
+    fetch(`/api/jira/links?approvalId=${encodeURIComponent(pendingKey)}`, { cache: 'no-store' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j: { links?: Record<string, { issueKey: string | null; issueUrl: string | null }> } | null) => {
+        if (!cancelled && j?.links) setJiraLinks(j.links)
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [pendingKey])
+
   const handleApproval = async (approvalId: string, decision: 'proceed' | 'reject') => {
     setAction(decision)
     setActionError(null)
@@ -402,6 +419,16 @@ export function IncidentDetailClient({ id }: { id: string }) {
                   <span className="ml-1 font-mono text-[11px] text-bh-faint">
                     {approval.approvalId}
                   </span>
+                  {jiraLinks[approval.approvalId]?.issueUrl && (
+                    <a
+                      href={jiraLinks[approval.approvalId].issueUrl ?? undefined}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] font-medium text-bh-accent hover:underline"
+                    >
+                      Jira {jiraLinks[approval.approvalId].issueKey}: move to Done to approve, To Do to reject
+                    </a>
+                  )}
                 </div>
               ))}
             </div>

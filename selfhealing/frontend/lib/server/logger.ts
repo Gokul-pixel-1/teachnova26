@@ -241,11 +241,23 @@ export function logApiError(err: unknown, input: LogApiErrorInput = {}): void {
 }
 
 let lastAutoScanAt = 0
+let trailingScan: ReturnType<typeof setTimeout> | null = null
 const AUTO_SCAN_INTERVAL_MS = 8_000
 
 async function maybeAutoScan(): Promise<void> {
   const now = Date.now()
-  if (now - lastAutoScanAt < AUTO_SCAN_INTERVAL_MS) return
+  if (now - lastAutoScanAt < AUTO_SCAN_INTERVAL_MS) {
+    // Throttled: scan once when the window ends, so a failure that lands
+    // inside it still opens (or merges into) an incident without waiting
+    // for another error to arrive.
+    if (!trailingScan) {
+      trailingScan = setTimeout(() => {
+        trailingScan = null
+        void maybeAutoScan()
+      }, AUTO_SCAN_INTERVAL_MS - (now - lastAutoScanAt) + 50)
+    }
+    return
+  }
   lastAutoScanAt = now
   try {
     const { scanForRuntimeIncidents } = await import('./repair/log-monitor')

@@ -21,6 +21,7 @@ const NAV: Array<{ href: string; label: string; icon: IconName; exact?: boolean 
   { href: '/ai/history', label: 'History', icon: 'history' },
   { href: '/ai/learning', label: 'Learning', icon: 'activity' },
   { href: '/ai/reports', label: 'Reports', icon: 'file' },
+  { href: '/ai/ux-suggestions', label: 'UX Suggestions', icon: 'sparkles' },
 ]
 
 function ShellStatus({ className }: { className?: string }) {

@@ -67,7 +67,7 @@ export default function ProjectsPage() {
       </div>
 
       <div className="mt-5 flex flex-col gap-3 sm:flex-row">
-        <div className="relative flex-1">
+        <div className="relative flex-1" data-ux-id="projects-search">
           <span className="pointer-events-none absolute inset-y-0 left-0 flex w-10 items-center justify-center text-bh-faint">
             <Icon name="search" size={18} />
           </span>
@@ -79,7 +79,7 @@ export default function ProjectsPage() {
             className="pl-10"
           />
         </div>
-        <div className="w-full sm:w-48">
+        <div className="w-full sm:w-48" data-ux-id="projects-status-filter">
           <Select
             value={status}
             onChange={(e) => setStatus(e.target.value as 'all' | ProjectStatus)}

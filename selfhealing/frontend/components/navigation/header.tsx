@@ -26,14 +26,17 @@ export function Header({ onMenuClick }: HeaderProps) {
         <Icon name="menu" size={20} />
       </button>
 
+      {!user && (
+        <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex">
+          <Link href="/login" data-ux-id="login-button">Log in</Link>
+        </Button>
+      )}
+
       <div className="ml-auto flex items-center gap-1.5">
         {!user ? (
           <>
-            <Button asChild variant="ghost" size="sm" className="hidden sm:inline-flex">
-              <Link href="/login">Log in</Link>
-            </Button>
             <Button asChild variant="primary" size="sm">
-              <Link href="/signup">Sign up</Link>
+              <Link href="/signup" data-ux-id="signup-button">Sign up</Link>
             </Button>
           </>
         ) : (

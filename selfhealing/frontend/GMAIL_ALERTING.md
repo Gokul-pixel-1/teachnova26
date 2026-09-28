@@ -55,15 +55,20 @@ The `/ai/security` Gmail card shows the same missing-variable message.
 
 ## Minting the refresh token (one time)
 
-1. As an operator: `GET /api/gmail/oauth/url` → open `consentUrl` as the
+1. As an operator: `GET /api/gmail/oauth/url` → open `consentUrl` (single
+   use, valid 15 minutes — it carries a `state` bound to this server) as the
    `GMAIL_SENDER_EMAIL` account and approve the `gmail.send` scope.
-2. Google redirects to `GMAIL_REDIRECT_URI` (`/api/gmail/oauth/callback`,
-   informational — it never reads or stores the code).
-3. Exchange the `?code=…` from the address bar ONCE, locally (the code,
-   like all credentials, never leaves your machine and never enters chat).
-   Pick one:
+2. Google redirects to `GMAIL_REDIRECT_URI` (`/api/gmail/oauth/callback`).
+   The callback verifies `state`, saves the one-time code to the gitignored
+   `frontend/.data/gmail-oauth-code` (never logged; the dev request log
+   ignores this path) and redirects to a clean URL, so the code is NOT left
+   in the address bar. It reports honestly when no code / an error / an
+   unknown state arrived instead.
+3. Exchange the code ONCE, locally (the code, like all credentials, never
+   leaves your machine and never enters chat). Pick one:
    a. Offline mint script (recommended) — run inside `frontend/`:
-   `GMAIL_OAUTH_CODE='<code>' node scripts/mint-gmail-refresh-token.mjs`
+   `node scripts/mint-gmail-refresh-token.mjs` (reads the saved code and
+   deletes it after the exchange; `GMAIL_OAUTH_CODE='<code>'` still works)
    It writes `GMAIL_REFRESH_TOKEN` straight to `frontend/.env` and prints
    ONLY "Refresh token obtained successfully." Then restart the server.
    b. Server exchange route — from the browser devtools console on the app

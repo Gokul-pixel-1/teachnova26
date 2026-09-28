@@ -98,6 +98,7 @@ export function CommentForm({
           <Button
             type="submit"
             size="sm"
+            data-ux-id="post-comment-button"
             loading={status === 'loading'}
             disabled={!content.trim()}
           >

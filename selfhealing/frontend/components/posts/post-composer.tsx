@@ -152,6 +152,7 @@ export function PostComposer({ onCreated }: { onCreated?: () => void }) {
         <Button
           type="submit"
           size="sm"
+          data-ux-id="publish-post-button"
           loading={status === 'loading'}
           disabled={!content.trim()}
         >

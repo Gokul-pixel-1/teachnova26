@@ -6,7 +6,7 @@
  * gmail.send consent screen as the GMAIL_SENDER_EMAIL account:
  *
  *   Google authorization (consent, access_type=offline + prompt=consent)
- *     ↓ authorization code (?code=… in the callback address bar)
+ *     ↓ authorization code → saved by the callback to frontend/.data/gmail-oauth-code
  *     ↓ this script: POST oauth2.googleapis.com/token (grant_type=authorization_code)
  *     ↓ refresh_token
  *     ↓ written to frontend/.env as GMAIL_REFRESH_TOKEN
@@ -14,9 +14,10 @@
  * SECURITY CONTRACT (never violated):
  *   - The refresh token is NEVER printed to stdout/stderr, NEVER logged,
  *     NEVER returned by any API, NEVER embedded in email/dashboard/chat/Git.
- *   - The authorization code is read from the GMAIL_OAUTH_CODE env var (never
- *     passed as a CLI flag, so it never appears in process listings) and is
- *     held only in memory for the single token exchange.
+ *   - The authorization code is read from the GMAIL_OAUTH_CODE env var if set,
+ *     otherwise from the gitignored file the callback saved (never a CLI flag,
+ *     so it never appears in process listings). It is held only in memory for
+ *     the single token exchange, and the saved file is deleted afterwards.
  *   - Diagnostics print ONLY safe metadata: HTTP status, Google's error code /
  *     description, the redirect URI used (a non-secret identifier), and the
  *     code LENGTH (never any character of the code itself).
@@ -27,13 +28,15 @@
  *         "Refresh token obtained successfully."
  *     plus the expected environment variable name — never the value.
  *
- * Usage:
- *     GMAIL_OAUTH_CODE='<code-from-callback-address-bar>' node scripts/mint-gmail-refresh-token.mjs
+ * Usage (after approving the consent link from GET /api/gmail/oauth/url):
+ *     node scripts/mint-gmail-refresh-token.mjs
+ * or, with a code obtained some other way:
+ *     GMAIL_OAUTH_CODE='<code>' node scripts/mint-gmail-refresh-token.mjs
  *
  * Then: restart the application so the server picks up GMAIL_REFRESH_TOKEN.
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -64,26 +67,40 @@ function loadDotEnv(path) {
   return out
 }
 
-/** Fresh consent URL from non-secret identifiers (same parameters as
- *  GET /api/gmail/oauth/url). Safe to display. */
-function buildConsentUrl(clientId, redirectUri, scopes) {
-  const url = new URL('https://accounts.google.com/o/oauth2/v2/auth')
-  url.searchParams.set('client_id', clientId)
-  url.searchParams.set('redirect_uri', redirectUri)
-  url.searchParams.set('response_type', 'code')
-  url.searchParams.set('scope', scopes)
-  url.searchParams.set('access_type', 'offline')
-  url.searchParams.set('prompt', 'consent')
-  return url.toString()
-}
+// Consent links carry a single-use `state` issued by the running server, so a
+// fresh link must come from the server (operator login required), not from
+// this script.
+const FRESH_LINK = 'http://localhost:3000/api/gmail/oauth/url  (log in to BuildHub as the operator, then open the consentUrl it returns)'
 
+// The callback route saves the code here (gitignored, owner-only); it is
+// deleted after the single exchange attempt below.
+const CODE_FILE = resolve(FRONTEND_DIR, '.data', 'gmail-oauth-code')
+let codeFromFile = false
 let rawCode = (process.env.GMAIL_OAUTH_CODE ?? '').trim()
+if (!rawCode && existsSync(CODE_FILE)) {
+  rawCode = readFileSync(CODE_FILE, 'utf8').trim()
+  codeFromFile = true
+}
 if (!rawCode) {
   fail(
-    'Missing authorization code. Re-run as:\n' +
-      "  GMAIL_OAUTH_CODE='<code-from-callback-address-bar>' node scripts/mint-gmail-refresh-token.mjs\n" +
+    'No authorization code found. Complete the consent step first: get a fresh link at\n' +
+      `  ${FRESH_LINK}\n` +
+      'open it as the GMAIL_SENDER_EMAIL account and approve; the callback saves the code to\n' +
+      '  frontend/.data/gmail-oauth-code\n' +
+      'then re-run: node scripts/mint-gmail-refresh-token.mjs\n' +
       'No token was requested and nothing was written.',
   )
+}
+if (codeFromFile) console.error('Using the authorization code saved by the OAuth callback (value not shown).')
+
+/** Codes are single use: once Google has seen it, the saved copy is useless. */
+function discardSavedCode() {
+  if (!codeFromFile) return
+  try {
+    unlinkSync(CODE_FILE)
+  } catch {
+    /* already gone */
+  }
 }
 
 // Normalize unambiguous paste artifacts (codes never contain whitespace and
@@ -98,7 +115,6 @@ const env = loadDotEnv(ENV_PATH)
 const clientId = (env.GMAIL_CLIENT_ID ?? '').trim()
 const clientSecret = (env.GMAIL_CLIENT_SECRET ?? '').trim()
 const redirectUri = (env.GMAIL_REDIRECT_URI ?? '').trim() || 'http://localhost:3000/api/gmail/oauth/callback'
-const scopes = (env.GMAIL_OAUTH_SCOPES ?? '').trim() || 'https://www.googleapis.com/auth/gmail.send'
 if (!clientId || !clientSecret) {
   const missing = [!clientId && 'GMAIL_CLIENT_ID', !clientSecret && 'GMAIL_CLIENT_SECRET'].filter(Boolean)
   fail(`Gmail OAuth setup incomplete (missing ${missing.join(', ')} in frontend/.env). Nothing was written.`)
@@ -140,6 +156,11 @@ try {
   fail(`Token exchange failed: network error (${err instanceof Error ? err.message : 'unknown'}). Nothing was written.`.slice(0, 200))
 }
 
+// Google has now seen the code (success or rejection) — it can never be used
+// again, so the saved copy is removed. A network failure above keeps it for a
+// retry within its few-minute lifetime.
+discardSavedCode()
+
 const refreshToken = typeof data?.refresh_token === 'string' ? data.refresh_token.trim() : ''
 if (refreshToken) {
   // Success: persist WITHOUT ever printing the value.
@@ -160,7 +181,7 @@ if (refreshToken) {
 const googleError = typeof data?.error === 'string' ? data.error : ''
 const googleDesc = typeof data?.error_description === 'string' ? data.error_description : ''
 const safeGoogle = `HTTP ${httpStatus}${googleError ? ` | error=${googleError}` : ''}${googleDesc ? ` | description=${googleDesc.slice(0, 200)}` : ''}`
-const consentUrl = buildConsentUrl(clientId, redirectUri, scopes)
+const consentUrl = FRESH_LINK
 
 if (httpStatus === 200) {
   fail(

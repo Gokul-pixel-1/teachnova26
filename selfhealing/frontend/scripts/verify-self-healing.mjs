@@ -495,7 +495,7 @@ async function run() {
   console.log('\nFault Injection API')
   const faultsList = await op.get('/api/faults')
   check('GET /api/faults → 200 + enabled', faultsList.status === 200 && faultsList.json?.enabled === true, `status=${faultsList.status} enabled=${faultsList.json?.enabled}`)
-  check('10 faults registered', faultsList.json?.total === 10, `got ${faultsList.json?.total}`)
+  check('11 faults registered', faultsList.json?.total === 11, `got ${faultsList.json?.total}`)
   for (const id of ['LOW-01', 'LOW-02', 'LOW-03', 'MEDIUM-01', 'MEDIUM-02', 'MEDIUM-03', 'HIGH-01', 'HIGH-02', 'HIGH-03']) {
     const fault = faultsList.json?.faults?.find((f) => f.id === id)
     check(`Fault registry has ${id}`, !!fault, 'not found')

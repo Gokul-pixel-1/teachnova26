@@ -26,6 +26,8 @@ import { deactivateFaultsForEndpoint } from '@/lib/server/fault-injection'
 import { createApproval, consumeApproval, rejectApproval } from '@/lib/server/approval'
 import { sendTelegram } from '@/lib/server/telegram'
 import { sendApprovalEmail, sendFinalEmail } from '@/lib/server/gmail'
+import { approvalChannel, jiraApprovalTtlMs } from '@/lib/server/jira/client'
+import { openRepairJiraApproval } from '@/lib/server/jira/approvals'
 import {
   sendIncidentTerminalSummary,
   sendRepairPlanMessage,
@@ -221,6 +223,9 @@ export async function runSelfHealingRepair(
       patchId: `PATCH-${candidate.file.replace(/\//g, '-')}`,
       operator: 'system',
       repairAttemptId: attempt.id,
+      // A Jira card is decided on a board, not a one-click link: give it
+      // JIRA_APPROVAL_TTL_MINUTES (default 30) instead of the 5-minute email window.
+      ...(approvalChannel() === 'jira' ? { expiresInMs: jiraApprovalTtlMs() } : {}),
     })
     await updateAttemptStatus(attempt.id, 'WAITING_APPROVAL', { risk, riskReason: `${risk} risk: human approval required (${approval.approvalId})` })
     await prisma.incident.update({
@@ -525,17 +530,33 @@ async function notifyApproval(
   return { sent: false, reason: `send failed: ${result.error}` }
 }
 
-/** Approval-request email (Gmail) with one-click tokens. Never throws. */
+/** Approval request: a Jira issue when the Jira channel is active (falling
+ * back to email if Jira cannot be reached), else the Gmail email with
+ * one-click tokens. Never throws. */
 async function notifyApprovalEmail(
   incident: Incident,
   risk: 'MEDIUM' | 'HIGH',
   approvalId: string,
 ): Promise<{ sent: boolean; reason: string }> {
+  let jiraError: string | null = null
+  if (approvalChannel() === 'jira') {
+    const jira = await openRepairJiraApproval({ incident, risk, approvalId }).catch((err: unknown) => ({
+      ok: false,
+      issueKey: null,
+      error: err instanceof Error ? err.message : 'Jira failed',
+    }))
+    if (jira.ok) {
+      await addIncidentEvent(incident.id, 'AWAITING_REVIEW', `Approval requested in Jira ${jira.issueKey}`, approvalId).catch(() => undefined)
+      return { sent: true, reason: `jira issue ${jira.issueKey}` }
+    }
+    jiraError = jira.error
+  }
   try {
     const result = await sendApprovalEmail({ incident, risk, approvalId })
+    const fallback = jiraError ? ` (Jira failed: ${jiraError})` : ''
     return result.ok
-      ? { sent: true, reason: `sent (${result.deliveryStatus})` }
-      : { sent: false, reason: result.error ?? 'gmail send failed' }
+      ? { sent: true, reason: `sent (${result.deliveryStatus})${fallback}` }
+      : { sent: false, reason: (result.error ?? 'gmail send failed') + fallback }
   } catch (err) {
     return { sent: false, reason: `gmail failed: ${err instanceof Error ? err.message : 'unknown'}` }
   }
