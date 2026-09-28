@@ -345,6 +345,16 @@ export function UxSuggestionsClient() {
             that passed. Nothing changes until you approve.
           </p>
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+        <a
+          href="/ai/ux-live"
+          target="_blank"
+          rel="noopener"
+          className="flex h-9 items-center gap-2 rounded-md border border-bh-line px-3.5 text-sm font-medium text-bh-ink hover:bg-bh-surface-2"
+        >
+          <Icon name="eye" size={15} />
+          Open live sandbox tab
+        </a>
         <button
           onClick={() => void analyze()}
           disabled={analyzing}
@@ -357,6 +367,7 @@ export function UxSuggestionsClient() {
           )}
           {analyzing ? 'Analyzing…' : 'Analyze behaviour now'}
         </button>
+        </div>
       </div>
 
       {notice && (

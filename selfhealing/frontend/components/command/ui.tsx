@@ -30,6 +30,7 @@ export function statusTone(status: IncidentStatus) {
     case 'RESOLVED':
       return 'text-bh-success'
     case 'ROLLED_BACK':
+    case 'REJECTED':
       return 'text-bh-warning'
     case 'AWAITING_REVIEW':
       return 'text-bh-info'

@@ -14,6 +14,7 @@ const VALID_STATUSES = [
   'AWAITING_REVIEW',
   'RESOLVED',
   'ROLLED_BACK',
+  'REJECTED',
 ] as const satisfies readonly IncidentStatus[]
 const VALID_SEVERITIES = ['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'] as const satisfies readonly IncidentSeverity[]
 

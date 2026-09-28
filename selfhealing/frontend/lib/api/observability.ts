@@ -11,6 +11,7 @@ export type IncidentStatus =
   | 'RESOLVED'
   | 'ROLLED_BACK'
   | 'AI_REPAIR_FAILED'
+  | 'REJECTED'
 
 export type IncidentSeverity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
 

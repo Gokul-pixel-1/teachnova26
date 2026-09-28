@@ -759,7 +759,7 @@ export async function finalizeRejectedRepair(
   await prisma.incident.update({
     where: { id: existing.incidentId },
     data: {
-      status: 'AI_REPAIR_FAILED',
+      status: 'REJECTED',
       summary: `${riskWord} repair rejected by ${operatorLabel} (${approvalId}) — no code changed.`,
     },
   })

@@ -12,7 +12,7 @@ export default function AiHistoryPage() {
       <IncidentsClient
         title="History"
         hint="resolved and rolled-back incidents"
-        forceStatus="RESOLVED,ROLLED_BACK"
+        forceStatus="RESOLVED,ROLLED_BACK,REJECTED"
       />
     </div>
   )

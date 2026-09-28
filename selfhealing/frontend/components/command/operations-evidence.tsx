@@ -50,7 +50,7 @@ export function SystemHealthRail({ summary }: { summary: SummaryResponse }) {
 }
 
 export function LearningSecurityEvidence({ learning, security }: { learning: LearningResponse | null; security: SecurityStatusDTO | null }) {
-  const openSecurityIncidents = security?.incidents.filter((incident) => !['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED'].includes(incident.status)) ?? []
+  const openSecurityIncidents = security?.incidents.filter((incident) => !['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED', 'REJECTED'].includes(incident.status)) ?? []
   const securityActive = (security?.overview.activeFindings ?? 0) > 0 || openSecurityIncidents.length > 0
   return (
     <section className="grid gap-4 lg:grid-cols-2" aria-label="Learning and security evidence">

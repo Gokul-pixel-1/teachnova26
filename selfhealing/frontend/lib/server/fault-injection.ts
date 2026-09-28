@@ -25,6 +25,7 @@ import 'server-only'
 // safety contract, so activation is refused.
 
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { readFileSync, statSync } from 'node:fs'
 import { resolve, dirname } from 'node:path'
 
 /**
@@ -178,7 +179,7 @@ export const FAULT_REGISTRY: Record<string, FaultConfig> = {
       'POST /api/posts/[id]/comments throws a controlled Error("COMMENT-01: Injected comment service failure") while active (500).',
     target: {
       file: 'app/api/posts/[id]/comments/route.ts',
-      line: 87,
+      line: 82,
       function: 'POST handler',
     },
     trigger: { method: 'POST', endpoint: '/api/posts/[id]/comments' },
@@ -222,7 +223,7 @@ export const FAULT_REGISTRY: Record<string, FaultConfig> = {
       'GET /api/posts throws a controlled Error("Injected DB query failure") while active (500).',
     target: {
       file: 'app/api/posts/route.ts',
-      line: 138,
+      line: 121,
       function: 'GET handler',
     },
     trigger: { method: 'GET', endpoint: '/api/posts' },
@@ -329,7 +330,20 @@ function stateFilePath(): string {
   return resolve(process.cwd(), '.data', 'fault-state.json')
 }
 
-let activeFaults = new Set<string>()
+// One active-fault set per server process. In `next dev` each route bundle
+// can load its own copy of this module; a module-level Set would let the
+// repair engine deactivate a fault in ITS copy while the route handler still
+// sees it active in another copy (validation then fails and rolls back).
+// globalThis is shared by every copy, so all handlers see the same state.
+const ACTIVE_KEY = '__buildhub_active_faults__'
+const faultGlobal = globalThis as unknown as Record<string, Set<string> | undefined>
+if (!faultGlobal[ACTIVE_KEY]) faultGlobal[ACTIVE_KEY] = new Set<string>()
+const activeFaults = faultGlobal[ACTIVE_KEY] as Set<string>
+
+function replaceActive(ids: Iterable<string>): void {
+  activeFaults.clear()
+  for (const id of ids) activeFaults.add(id)
+}
 
 function applyActiveSet(): void {
   for (const fault of Object.values(FAULT_REGISTRY)) {
@@ -343,10 +357,10 @@ async function loadPersistedState(): Promise<void> {
     const parsed = JSON.parse(raw) as { version?: number; active?: string[] } | null
     const ids = Array.isArray(parsed?.active) ? (parsed?.active ?? []) : []
     const known = new Set(Object.keys(FAULT_REGISTRY))
-    activeFaults = new Set(ids.filter((id) => known.has(id)))
+    replaceActive(ids.filter((id) => known.has(id)))
   } catch {
     // No state file yet (or unreadable) → all inactive. Never crash on a bad file.
-    activeFaults = new Set()
+    replaceActive([])
   }
   applyActiveSet()
 }
@@ -377,9 +391,30 @@ export function getFault(faultId: string): FaultConfig | null {
   return FAULT_REGISTRY[faultId] ?? null
 }
 
-/** Synchronous guard read used by route handlers — NEVER blocks on disk. */
+// The durable state file is the source of truth. Code that runs outside the
+// request graph (the background Jira poller started from instrumentation, the
+// auto-repair queue) may hold a separate in-memory copy, so a guard re-reads
+// the file whenever it changed on disk (a cheap stat per check).
+let seenStateMtime = -1
+
+function syncFromDisk(): void {
+  try {
+    const mtime = statSync(stateFilePath()).mtimeMs
+    if (mtime === seenStateMtime) return
+    const parsed = JSON.parse(readFileSync(stateFilePath(), 'utf8')) as { active?: string[] } | null
+    const known = new Set(Object.keys(FAULT_REGISTRY))
+    replaceActive((Array.isArray(parsed?.active) ? parsed.active : []).filter((id) => known.has(id)))
+    applyActiveSet()
+    seenStateMtime = mtime
+  } catch {
+    // No/unreadable state file: keep the in-memory state.
+  }
+}
+
+/** Synchronous guard read used by route handlers. */
 export function isFaultActive(faultId: string): boolean {
   if (!isFaultInjectionEnabled()) return false
+  syncFromDisk()
   return activeFaults.has(faultId)
 }
 

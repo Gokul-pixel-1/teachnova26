@@ -149,6 +149,9 @@ export const fetchBehaviorReport = () => getJson<BehaviorReportDTO>('/api/ux/beh
 
 export const analyzeBehaviorNow = () => postJson<BehaviorReportDTO>('/api/ux/behavior', {})
 
+/** Starts the live-simulation browser streamed by the /ai/ux-live tab. */
+export const openLiveSandbox = () => postJson<{ ok: boolean }>('/api/ux/live', {})
+
 export const retestUxSuggestion = (id: string) =>
   postJson<{ ok: boolean; status?: string }>(`/api/ux/suggestions/${id}/retest`, {})
 

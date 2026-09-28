@@ -22,6 +22,7 @@ const NAV: Array<{ href: string; label: string; icon: IconName; exact?: boolean 
   { href: '/ai/learning', label: 'Learning', icon: 'activity' },
   { href: '/ai/reports', label: 'Reports', icon: 'file' },
   { href: '/ai/ux-suggestions', label: 'UX Suggestions', icon: 'sparkles' },
+  { href: '/ai/ux-live', label: 'Live Sandbox', icon: 'eye' },
 ]
 
 function ShellStatus({ className }: { className?: string }) {

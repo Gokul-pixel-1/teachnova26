@@ -165,7 +165,7 @@ function StaticTopology({ stage }: { stage: OperationalStage }) {
 export function SystemTopology({ incident }: { incident: IncidentDetailDTO | null }) {
   const webgl = useWebGL()
   const stage = activeStage(incident)
-  const active = Boolean(incident && !['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED'].includes(incident.status))
+  const active = Boolean(incident && !['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED', 'REJECTED'].includes(incident.status))
   const highlighted = new Set(STAGE_NODES[stage])
   const pathLabel: Record<OperationalStage, string> = {
     DETECTION: 'BuildHub → Monitor (signal detected)', ANALYZER: 'Monitor → Analyzer', CODER: 'Analyzer → Coder',

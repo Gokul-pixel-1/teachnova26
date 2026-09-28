@@ -15,6 +15,7 @@ import { continueApprovedRepair, finalizeRejectedRepair } from '@/lib/server/rep
 import { addIncidentEvent } from '@/lib/server/repair/events'
 import { approveUxApproval, consumeUxApproval, expireUxApproval } from '@/lib/server/ux/approval'
 import { applyUxSuggestion } from '@/lib/server/ux/apply'
+import { sendUxSuggestionOutcomeEmail } from '@/lib/server/ux/email'
 import {
   adf,
   addComment,
@@ -320,7 +321,9 @@ export async function decideUx(approvalId: string, action: 'APPROVE' | 'REJECT',
   }
   if (action === 'REJECT') {
     await prisma.uxApproval.update({ where: { id: row.id }, data: { status: 'REJECTED', statusUpdatedAt: new Date() } })
-    await prisma.uxSuggestion.update({ where: { id: row.uxSuggestionId }, data: { status: 'REJECTED' } })
+    const rejected = await prisma.uxSuggestion.update({ where: { id: row.uxSuggestionId }, data: { status: 'REJECTED' } })
+    // Same Gmail result notice the dashboard / email decision paths send.
+    await sendUxSuggestionOutcomeEmail(rejected, 'REJECTED').catch(() => undefined)
     return { ok: true, outcome: `${ref} rejected by ${actor}. No file was changed.`, state: 'REJECTED' }
   }
   const approved = await approveUxApproval(approvalId)
@@ -328,6 +331,10 @@ export async function decideUx(approvalId: string, action: 'APPROVE' | 'REJECT',
   const suggestion = await prisma.uxSuggestion.findUniqueOrThrow({ where: { id: approved.uxSuggestionId } })
   const decision = await applyUxSuggestion(suggestion)
   await consumeUxApproval(approvalId)
+  if (decision.ok) {
+    const updated = await prisma.uxSuggestion.findUniqueOrThrow({ where: { id: suggestion.id } })
+    await sendUxSuggestionOutcomeEmail(updated, 'APPLIED').catch(() => undefined)
+  }
   return {
     ok: decision.ok,
     outcome: decision.ok

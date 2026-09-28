@@ -24,7 +24,7 @@ const SystemTopology = dynamic(
 )
 
 const REFRESH_MS = 15_000
-const TERMINAL = new Set(['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED'])
+const TERMINAL = new Set(['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED', 'REJECTED'])
 
 function pickIncident(rows: IncidentDTO[], current: string | null): string | null {
   if (current && rows.some((row) => row.id === current)) return current

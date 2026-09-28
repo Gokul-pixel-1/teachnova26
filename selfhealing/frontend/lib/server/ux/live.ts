@@ -34,7 +34,8 @@ export interface LiveState {
 const KEY = '__buildhub_ux_live_browser__'
 const g = globalThis as unknown as Record<string, Promise<Browser> | undefined>
 
-/** The single visible simulation browser (relaunched if the window was closed). */
+/** The single live-simulation browser. It runs without a window; what it
+ * shows is streamed to the /ai/ux-live tab (see latestLiveFrame). */
 export async function getLiveBrowser(): Promise<Browser> {
   const existing = g[KEY]
   if (existing) {
@@ -43,14 +44,14 @@ export async function getLiveBrowser(): Promise<Browser> {
     g[KEY] = undefined
   }
   const executablePath = chromePath()
-  if (!executablePath) throw new Error('No Chrome/Edge found for the live sandbox window.')
+  if (!executablePath) throw new Error('No Chrome/Edge found for the live sandbox view.')
   g[KEY] = (async () => {
     const puppeteer = (await import('puppeteer-core')).default
     const browser = await puppeteer.launch({
       executablePath,
-      headless: false,
-      defaultViewport: null,
-      args: ['--no-first-run', '--no-default-browser-check', '--window-size=1460,1040', '--window-position=40,20'],
+      headless: true,
+      defaultViewport: { width: 1400, height: 900 },
+      args: ['--no-first-run', '--no-default-browser-check', '--disable-gpu'],
     })
     browser.on('disconnected', () => {
       g[KEY] = undefined
@@ -60,7 +61,34 @@ export async function getLiveBrowser(): Promise<Browser> {
   return g[KEY] as Promise<Browser>
 }
 
-/** The one tab the live window uses (extra tabs are closed). */
+// ---------------------------------------------------------------------------
+// Screen stream: Chrome's screencast pushes a JPEG whenever the live page
+// changes; the latest one is kept here and served to the /ai/ux-live tab.
+
+export interface LiveFrame {
+  jpeg: Buffer
+  seq: number
+  at: number
+}
+
+const FRAME_KEY = '__buildhub_ux_live_frame__'
+const fg = globalThis as unknown as Record<string, LiveFrame | undefined>
+
+export function latestLiveFrame(): LiveFrame | null {
+  return fg[FRAME_KEY] ?? null
+}
+
+async function startScreencast(page: Page): Promise<void> {
+  const session = await page.createCDPSession()
+  session.on('Page.screencastFrame', (frame: { data: string; sessionId: number }) => {
+    const prev = fg[FRAME_KEY]
+    fg[FRAME_KEY] = { jpeg: Buffer.from(frame.data, 'base64'), seq: (prev?.seq ?? 0) + 1, at: Date.now() }
+    void session.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => undefined)
+  })
+  await session.send('Page.startScreencast', { format: 'jpeg', quality: 70, maxWidth: 1400, maxHeight: 1000, everyNthFrame: 1 })
+}
+
+/** The one tab the live browser uses (extra tabs are closed); streams its screen. */
 export async function getLivePage(browser: Browser): Promise<Page> {
   const pages = await browser.pages()
   const page = pages[0] ?? (await browser.newPage())
@@ -68,6 +96,7 @@ export async function getLivePage(browser: Browser): Promise<Page> {
   const marked = page as Page & { __uxLiveInstalled?: boolean }
   if (!marked.__uxLiveInstalled) {
     await page.evaluateOnNewDocument(RENDERER)
+    await startScreencast(page).catch(() => undefined)
     marked.__uxLiveInstalled = true
   }
   return page

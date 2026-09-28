@@ -22,6 +22,7 @@ const PRESETS: Array<{ key: string; label: string; status?: string; severity?: s
   { key: 'active', label: 'Active', status: 'DETECTED,INVESTIGATING,AWAITING_REVIEW' },
   { key: 'resolved', label: 'Resolved', status: 'RESOLVED' },
   { key: 'rolled-back', label: 'Rolled back', status: 'ROLLED_BACK' },
+  { key: 'rejected', label: 'Rejected', status: 'REJECTED' },
 ]
 
 const SEVERITY_OPTIONS = ['', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']

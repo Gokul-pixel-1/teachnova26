@@ -93,7 +93,7 @@ export async function consumeEmailToken(rawToken: string): Promise<ConsumedEmail
       alreadyDecided: true,
     }
   }
-  const terminalIncident = ['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED'].includes(row.approval.incident.status)
+  const terminalIncident = ['RESOLVED', 'ROLLED_BACK', 'AI_REPAIR_FAILED', 'REJECTED'].includes(row.approval.incident.status)
   if (terminalIncident) {
     return {
       ok: false,

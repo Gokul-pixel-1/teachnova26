@@ -9,6 +9,7 @@ import {
   handleRouteError,
 } from '@/lib/server/response'
 import { serializeComment } from '@/lib/server/serializers'
+import { isFaultActive } from '@/lib/server/fault-injection'
 
 export async function GET(
   _request: Request,
@@ -76,8 +77,9 @@ export async function POST(
       return errorResponse('Post not found.', 404)
     }
 
-    // COMMENT-01 physical replacement: deliberately fail before persistence.
-    if (Date.now() >= 0) {
+    // COMMENT-01 (runtime fault, LOW risk): only while activated from the
+    // Command Center, comment creation fails before persistence (500).
+    if (isFaultActive('COMMENT-01')) {
       throw new Error('COMMENT-01: Injected comment service failure')
     }
 

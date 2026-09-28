@@ -116,6 +116,12 @@ export async function GET(request: Request) {
   )
 
   try {
+    // MEDIUM-02 (runtime fault, MEDIUM risk): only while activated from the
+    // Command Center, the feed query fails (500) and the home feed cannot load.
+    if (isFaultActive('MEDIUM-02')) {
+      throw new Error('Injected DB query failure')
+    }
+
     const where = author
       ? { author: { username: author } }
       : {}

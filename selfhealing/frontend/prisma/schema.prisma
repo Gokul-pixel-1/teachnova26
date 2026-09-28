@@ -139,6 +139,7 @@ enum IncidentStatus {
   RESOLVED
   ROLLED_BACK
   AI_REPAIR_FAILED
+  REJECTED // a human rejected the proposed repair (no code changed)
 }
 
 enum LogLevel {

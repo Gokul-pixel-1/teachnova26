@@ -93,7 +93,7 @@ export function IncidentStory({
           <div className="mb-5 flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs font-semibold text-bh-accent-ink">{incident.ref}</span>
             <Pill tone={incident.severity === 'HIGH' || incident.severity === 'CRITICAL' ? 'danger' : incident.severity === 'MEDIUM' ? 'warning' : 'info'}>{incident.severity}</Pill>
-            <Pill tone={incident.status === 'RESOLVED' ? 'success' : incident.status === 'ROLLED_BACK' || incident.status === 'AI_REPAIR_FAILED' ? 'danger' : 'accent'}>{incident.status.replaceAll('_', ' ')}</Pill>
+            <Pill tone={incident.status === 'RESOLVED' ? 'success' : incident.status === 'ROLLED_BACK' || incident.status === 'AI_REPAIR_FAILED' || incident.status === 'REJECTED' ? 'danger' : 'accent'}>{incident.status.replaceAll('_', ' ')}</Pill>
             <Pill tone={risk === 'LOW' ? 'success' : risk === 'MEDIUM' ? 'warning' : 'danger'}>RISK {risk}</Pill>
             <Pill tone={humanRequired ? 'warning' : 'neutral'}>{humanRequired ? 'HUMAN APPROVAL REQUIRED' : 'POLICY AUTO-APPLY'}</Pill>
             <Link href={`/ai/incidents/${incident.id}`} className="ml-auto inline-flex items-center gap-1 text-xs text-bh-accent-ink hover:underline">Full evidence <Icon name="arrowRight" size={12} /></Link>
