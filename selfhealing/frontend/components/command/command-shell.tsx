@@ -12,17 +12,41 @@ import type { SafeUser } from '@/lib/server/auth'
 
 type SafeUserShape = Pick<SafeUser, 'name' | 'username'>
 
-const NAV: Array<{ href: string; label: string; icon: IconName; exact?: boolean }> = [
-  { href: '/ai', label: 'Overview', icon: 'grid', exact: true },
-  { href: '/ai/security', label: 'Security', icon: 'radar' },
-  { href: '/ai/incidents', label: 'Incidents', icon: 'bug' },
-  { href: '/ai/logs', label: 'Live Logs', icon: 'terminal' },
-  { href: '/ai/pipeline', label: 'AI Pipeline', icon: 'gitBranch' },
-  { href: '/ai/history', label: 'History', icon: 'history' },
-  { href: '/ai/learning', label: 'Learning', icon: 'activity' },
-  { href: '/ai/reports', label: 'Reports', icon: 'file' },
-  { href: '/ai/ux-suggestions', label: 'UX Suggestions', icon: 'sparkles' },
-  { href: '/ai/ux-live', label: 'Live Sandbox', icon: 'eye' },
+type NavItem = { href: string; label: string; icon: IconName; exact?: boolean; external?: boolean }
+
+const NAV_GROUPS: Array<{ title: string; items: NavItem[] }> = [
+  {
+    title: 'Operate',
+    items: [
+      { href: '/ai', label: 'Overview', icon: 'grid', exact: true },
+      { href: '/ai/incidents', label: 'Incidents', icon: 'bug' },
+      { href: '/ai/logs', label: 'Live Logs', icon: 'terminal' },
+      { href: '/ai/security', label: 'Security', icon: 'radar' },
+    ],
+  },
+  {
+    title: 'AI Engine',
+    items: [
+      { href: '/ai/pipeline', label: 'AI Pipeline', icon: 'gitBranch' },
+      { href: '/ai/learning', label: 'Learning', icon: 'activity' },
+      { href: '/ai/history', label: 'History', icon: 'history' },
+    ],
+  },
+  {
+    title: 'UX Agent',
+    items: [
+      { href: '/ai/ux-suggestions', label: 'UX Suggestions', icon: 'sparkles' },
+      { href: '/ai/ux-live', label: 'Live Sandbox', icon: 'eye' },
+    ],
+  },
+  {
+    title: 'Business',
+    items: [
+      { href: '/ai/impact', label: 'Business Impact', icon: 'compass' },
+      { href: '/ai/reports', label: 'Reports', icon: 'file' },
+      { href: '/status', label: 'Public Status Page', icon: 'link', external: true },
+    ],
+  },
 ]
 
 function ShellStatus({ className }: { className?: string }) {
@@ -132,64 +156,76 @@ function SidebarContent({
   onNavigate?: () => void
 }) {
   return (
-    <div className="flex h-full flex-col gap-6 px-4 py-5">
+    <div className="flex h-full flex-col gap-5 overflow-y-auto px-4 py-5">
       <Link
         href="/ai"
         onClick={onNavigate}
-        className="flex items-center gap-2.5"
+        className="flex items-center gap-3 px-1"
         aria-label="BuildHub AI Command Center home"
       >
-        <span className="flex h-9 w-9 items-center justify-center rounded-lg border border-bh-line bg-bh-surface-2 text-bh-accent-ink">
-          <Icon name="shield" size={18} />
+        <span className="bh-gradient-bar flex h-10 w-10 items-center justify-center rounded-xl text-white shadow-lg shadow-cyan-500/20">
+          <Icon name="shield" size={20} />
         </span>
         <span className="leading-tight">
-          <span className="block text-sm font-bold tracking-wide text-bh-ink">
-            BUILDHUB <span className="text-bh-accent-ink">AI</span>
+          <span className="block text-base font-bold tracking-wide text-bh-ink">
+            BUILDHUB <span className="bh-gradient-text">AI</span>
           </span>
-          <span className="block text-[11px] text-bh-faint">Command Center</span>
+          <span className="block text-xs text-bh-muted">Command Center</span>
         </span>
       </Link>
 
-      <nav className="flex min-w-0 flex-1 flex-col gap-0.5" aria-label="Command center">
-        {NAV.map((item) => {
-          const isActive = item.exact
-            ? active === item.href
-            : active === item.href || active.startsWith(`${item.href}/`)
-          return (
-            <Link
-              key={item.href}
-              href={item.href}
-              onClick={onNavigate}
-              aria-current={isActive ? 'page' : undefined}
-              className={cn(
-                'flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors',
-                isActive
-                  ? 'bg-bh-accent-soft font-medium text-bh-accent-ink'
-                  : 'text-bh-muted hover:bg-bh-surface-2 hover:text-bh-ink',
-              )}
-            >
-              <Icon name={item.icon} size={17} />
-              {item.label}
-            </Link>
-          )
-        })}
+      <nav className="flex min-w-0 flex-1 flex-col gap-4" aria-label="Command center">
+        {NAV_GROUPS.map((group) => (
+          <div key={group.title}>
+            <p className="mb-1.5 px-3 text-xs font-semibold uppercase tracking-[0.14em] text-bh-faint">{group.title}</p>
+            <div className="flex flex-col gap-0.5">
+              {group.items.map((item) => {
+                const isActive = item.exact
+                  ? active === item.href
+                  : active === item.href || active.startsWith(`${item.href}/`)
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={onNavigate}
+                    target={item.external ? '_blank' : undefined}
+                    aria-current={isActive ? 'page' : undefined}
+                    className={cn(
+                      'group relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
+                      isActive
+                        ? 'bg-bh-accent-soft text-bh-ink'
+                        : 'text-bh-muted hover:bg-bh-surface-2 hover:text-bh-ink',
+                    )}
+                  >
+                    {isActive && (
+                      <span className="bh-gradient-bar-v absolute inset-y-1.5 left-0 w-1 rounded-full" aria-hidden="true" />
+                    )}
+                    <Icon
+                      name={item.icon}
+                      size={18}
+                      className={isActive ? 'text-bh-accent-ink' : 'text-bh-faint group-hover:text-bh-accent-ink'}
+                    />
+                    <span className="flex-1">{item.label}</span>
+                    {item.external && <Icon name="arrowRight" size={13} className="-rotate-45 text-bh-faint" />}
+                  </Link>
+                )
+              })}
+            </div>
+          </div>
+        ))}
       </nav>
 
-      <div className="space-y-3 border-t border-bh-line pt-4">
+      <div className="space-y-3 rounded-xl border border-bh-line bg-bh-bg/40 p-3.5">
         <ShellStatus />
-        <div className="flex items-center gap-2 text-xs text-bh-faint">
-          <span className="flex h-6 w-6 items-center justify-center rounded bg-bh-accent-soft text-bh-accent-ink">
+        <div className="flex items-center gap-2.5 border-t border-bh-line pt-3 text-sm text-bh-muted">
+          <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-bh-accent-soft text-xs font-bold text-bh-accent-ink">
             {user.username.slice(0, 1).toUpperCase()}
           </span>
           <span className="min-w-0 flex-1 truncate">{user.username}</span>
+          <Link href="/" className="flex items-center gap-1 text-xs text-bh-muted hover:text-bh-ink" title="Exit to app">
+            <Icon name="logout" size={14} /> Exit
+          </Link>
         </div>
-        <Link
-          href="/"
-          className="flex items-center gap-2 text-xs text-bh-muted hover:text-bh-ink"
-        >
-          <Icon name="arrowRight" size={14} className="rotate-180" />
-          Exit to app
-        </Link>
       </div>
     </div>
   )
@@ -208,14 +244,14 @@ export function CommandShell({
   return (
     <div className="command-theme flex min-h-screen">
       {/* Desktop sidebar */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-60 border-r border-bh-line bg-bh-surface/70 backdrop-blur lg:block">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-64 print:!hidden border-r border-bh-line bg-bh-surface/75 backdrop-blur-xl lg:block">
         <SidebarContent active={pathname} user={user} />
       </aside>
 
       {/* Mobile drawer */}
       <div
         className={cn(
-          'fixed inset-0 z-40 bg-black/60 transition-opacity lg:hidden',
+          'fixed inset-0 z-40 bg-black/60 transition-opacity lg:hidden print:hidden',
           drawerOpen ? 'opacity-100' : 'pointer-events-none opacity-0',
         )}
         onClick={() => setDrawerOpen(false)}
@@ -223,7 +259,7 @@ export function CommandShell({
       />
       <aside
         className={cn(
-          'fixed inset-y-0 left-0 z-50 w-64 border-r border-bh-line bg-bh-surface transition-transform lg:hidden',
+          'fixed inset-y-0 left-0 z-50 w-72 print:hidden border-r border-bh-line bg-bh-surface transition-transform lg:hidden',
           drawerOpen ? 'translate-x-0' : '-translate-x-full',
         )}
         aria-hidden={!drawerOpen}
@@ -232,9 +268,9 @@ export function CommandShell({
       </aside>
 
       {/* Main column */}
-      <div className="flex min-w-0 flex-1 flex-col lg:pl-60">
+      <div className="flex min-w-0 flex-1 flex-col lg:pl-64 print:!pl-0">
         {/* Mobile top bar */}
-        <header className="sticky top-0 z-20 flex items-center gap-3 border-b border-bh-line bg-bh-bg/85 px-4 py-3 backdrop-blur lg:hidden">
+        <header className="sticky top-0 z-20 print:hidden flex items-center gap-3 border-b border-bh-line bg-bh-bg/85 px-4 py-3 backdrop-blur lg:hidden">
           <button
             onClick={() => setDrawerOpen(true)}
             className="flex h-9 w-9 items-center justify-center rounded-md border border-bh-line text-bh-muted hover:text-bh-ink"
@@ -248,7 +284,7 @@ export function CommandShell({
           </span>
         </header>
 
-        <main className="min-w-0 flex-1 px-4 py-5 sm:px-6 lg:px-8 lg:py-7">{children}</main>
+        <main className="min-w-0 flex-1 px-4 py-6 sm:px-6 lg:px-10 lg:py-9">{children}</main>
       </div>
     </div>
   )

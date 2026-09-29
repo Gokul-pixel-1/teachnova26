@@ -227,10 +227,10 @@ export function SecurityClient() {
 
       <div className="relative flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-xs font-medium uppercase tracking-widest text-bh-faint">
+          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-bh-accent-ink">
             Mission Control
           </p>
-          <h1 className="mt-1 text-2xl font-bold tracking-tight text-bh-ink">Security</h1>
+          <h1 className="mt-1.5 text-3xl font-bold tracking-tight text-bh-ink sm:text-4xl">Security</h1>
           <p className="mt-1 text-sm text-bh-muted">
             live security-log-analyzer posture · updates live via SSE
           </p>

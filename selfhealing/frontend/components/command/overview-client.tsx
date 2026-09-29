@@ -10,6 +10,7 @@ import type { LearningResponse } from '@/lib/api/learning'
 import { fetchSecurityStatus, subscribeSecurityEvents } from '@/lib/api/security'
 import type { LifecycleEventDTO, SecurityStatusDTO } from '@/lib/api/security'
 import { CommandCenterHero } from './command-center-hero'
+import { ImpactStrip } from './impact-client'
 import { DecisionGraph, IncidentStory, LiveAiFeed } from './incident-operations'
 import { dedupeEvents, incidentEvents, lifecycleEvents, logEvents, type OperationalEvent } from './command-center-model'
 import { LearningSecurityEvidence, SystemHealthRail } from './operations-evidence'
@@ -167,6 +168,8 @@ export function OverviewClient() {
         streamState={streamState}
         updatedLabel={lastUpdated ? lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'now'}
       />
+
+      <ImpactStrip />
 
       {error && <div className="rounded-lg border border-bh-warning/30 bg-bh-warning/5 px-4 py-2 text-xs text-bh-warning">Realtime refresh paused: {error}. Showing the last confirmed state.</div>}
 

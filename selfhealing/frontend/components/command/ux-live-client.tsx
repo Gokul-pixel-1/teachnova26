@@ -36,8 +36,8 @@ export function UxLiveClient() {
     <div className="space-y-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-xs font-medium uppercase tracking-widest text-bh-faint">Mission Control</p>
-          <h1 className="mt-1 text-2xl font-bold tracking-tight text-bh-ink">Live Sandbox</h1>
+          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-bh-accent-ink">Mission Control</p>
+          <h1 className="mt-1.5 text-3xl font-bold tracking-tight text-bh-ink sm:text-4xl">Live Sandbox</h1>
           <p className="mt-1 max-w-3xl text-sm text-bh-muted">
             The UX agent&apos;s test environment, live. When users struggle with a feature, you will see the cursor replay where
             they clicked, each AI placement applied to the sandbox copy (never the real site), and whether it passed. Keep

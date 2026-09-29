@@ -101,11 +101,34 @@ export function Card({
   return (
     <div
       className={cn(
-        'rounded-lg border border-bh-line bg-bh-surface/80 shadow-sm backdrop-blur-sm',
+        'bh-card rounded-2xl border border-bh-line bg-bh-surface/80 shadow-lg shadow-black/20 backdrop-blur-sm',
         className,
       )}
     >
       {children}
+    </div>
+  )
+}
+
+export function PageHeader({
+  eyebrow = 'Mission Control',
+  title,
+  description,
+  actions,
+}: {
+  eyebrow?: string
+  title: string
+  description?: React.ReactNode
+  actions?: React.ReactNode
+}) {
+  return (
+    <div className="flex flex-wrap items-end justify-between gap-4">
+      <div className="min-w-0">
+        <p className="text-sm font-semibold uppercase tracking-[0.16em] text-bh-accent-ink">{eyebrow}</p>
+        <h1 className="mt-1.5 text-3xl font-bold tracking-tight text-bh-ink sm:text-4xl">{title}</h1>
+        {description && <p className="mt-2 max-w-3xl text-base leading-relaxed text-bh-muted">{description}</p>}
+      </div>
+      {actions && <div className="flex flex-wrap items-center gap-2.5">{actions}</div>}
     </div>
   )
 }
@@ -122,16 +145,16 @@ export function CardHeader({
   extra?: React.ReactNode
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 border-b border-bh-line px-4 py-3">
-      <div className="flex items-center gap-2.5">
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-bh-line px-5 py-4">
+      <div className="flex min-w-0 items-center gap-3">
         {icon && (
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-bh-surface-2 text-bh-faint">
-            <Icon name={icon} size={15} />
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-bh-accent-soft text-bh-accent-ink">
+            <Icon name={icon} size={18} />
           </span>
         )}
-        <div>
-          <h2 className="text-sm font-semibold tracking-wide text-bh-ink">{title}</h2>
-          {hint && <p className="text-xs text-bh-faint">{hint}</p>}
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-bh-ink">{title}</h2>
+          {hint && <p className="text-sm text-bh-muted">{hint}</p>}
         </div>
       </div>
       {extra}
@@ -173,7 +196,7 @@ export function Pill({
   return (
     <span
       className={cn(
-        'inline-flex items-center gap-1.5 rounded border px-2 py-0.5 text-xs font-medium',
+        'inline-flex items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 py-0.5 text-xs font-semibold',
         tones[tone],
         className,
       )}
@@ -200,7 +223,7 @@ export function ProgressBar({
   }
   return (
     <div
-      className={cn('h-1.5 w-full overflow-hidden rounded-full bg-bh-surface-2', className)}
+      className={cn('h-2 w-full overflow-hidden rounded-full bg-bh-surface-2', className)}
       role="progressbar"
       aria-valuenow={value}
       aria-valuemin={0}
@@ -229,19 +252,23 @@ export function StatCard({
   icon?: IconName
 }) {
   return (
-    <Card className="p-4">
-      <div className="flex items-start justify-between gap-2">
+    <Card className="bh-card-hover p-5">
+      <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-medium uppercase tracking-wider text-bh-faint">{label}</p>
+          <p className="text-sm font-medium text-bh-muted">{label}</p>
           <p
-            className="mt-1.5 text-3xl font-semibold tabular-nums tracking-tight"
+            className="mt-2 text-3xl font-bold tabular-nums tracking-tight"
             style={accent ? { color: accent } : undefined}
           >
             {value}
           </p>
-          {sub && <p className="mt-1 truncate text-xs text-bh-muted">{sub}</p>}
+          {sub && <p className="mt-1.5 line-clamp-2 text-sm text-bh-muted">{sub}</p>}
         </div>
-        {icon && <Icon name={icon} size={18} className="mt-0.5 text-bh-faint" />}
+        {icon && (
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-bh-accent-soft text-bh-accent-ink">
+            <Icon name={icon} size={20} />
+          </span>
+        )}
       </div>
     </Card>
   )
@@ -249,8 +276,8 @@ export function StatCard({
 
 export function LoadingState({ label = 'Loading…' }: { label?: string }) {
   return (
-    <div className="flex items-center gap-3 py-12 text-sm text-bh-muted" role="status">
-      <span className="h-4 w-4 animate-spin rounded-full border-2 border-bh-line-strong border-t-bh-accent" />
+    <div className="flex items-center justify-center gap-3 py-16 text-base text-bh-muted" role="status">
+      <span className="h-5 w-5 animate-spin rounded-full border-2 border-bh-line-strong border-t-bh-accent" />
       {label}
     </div>
   )
@@ -292,10 +319,12 @@ export function EmptyState({
   message: string
 }) {
   return (
-    <div className="flex flex-col items-center gap-2 py-12 text-center">
-      <Icon name={icon} size={28} className="text-bh-faint" />
-      <p className="text-sm font-medium text-bh-ink">{title}</p>
-      <p className="max-w-sm text-xs text-bh-faint">{message}</p>
+    <div className="flex flex-col items-center gap-2.5 px-4 py-14 text-center">
+      <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-bh-surface-2 text-bh-faint">
+        <Icon name={icon} size={26} />
+      </span>
+      <p className="text-base font-semibold text-bh-ink">{title}</p>
+      <p className="max-w-md text-sm text-bh-muted">{message}</p>
     </div>
   )
 }
@@ -306,7 +335,7 @@ export function DetailGrid({ items }: { items: Array<[string, React.ReactNode]> 
       {items.map(([label, value]) => (
         <div key={label} className="min-w-0">
           <dt className="text-xs font-medium uppercase tracking-wider text-bh-faint">{label}</dt>
-          <dd className="mt-0.5 truncate font-mono text-xs text-bh-ink" title={String(value ?? '')}>
+          <dd className="mt-1 truncate font-mono text-sm text-bh-ink" title={String(value ?? '')}>
             {value ?? '—'}
           </dd>
         </div>

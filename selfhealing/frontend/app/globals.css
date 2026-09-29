@@ -158,33 +158,103 @@ body {
  * primitives (Button, Card, Badge) adapt automatically inside this scope.
  * ------------------------------------------------------------------------- */
 .command-theme {
-  --bh-bg: #0b0d10;
-  --bh-surface: #12161b;
-  --bh-surface-2: #1a2027;
-  --bh-ink: #dfe7ef;
-  --bh-muted: #9aa8b6;
-  --bh-faint: #5e6a77;
-  --bh-line: #1e262e;
-  --bh-line-strong: #2c3844;
+  --bh-bg: #070a0f;
+  --bh-surface: #0e141c;
+  --bh-surface-2: #16202b;
+  --bh-ink: #eaf1f8;
+  --bh-muted: #adbac8;
+  --bh-faint: #7b8898;
+  --bh-line: #1c2733;
+  --bh-line-strong: #2b3a4a;
 
-  --bh-accent: #0ea7bb;
-  --bh-accent-strong: #11bfd4;
-  --bh-accent-soft: #0d2e35;
-  --bh-accent-ink: #8ae0ea;
+  --bh-accent: #13b3c6;
+  --bh-accent-strong: #2fd0e2;
+  --bh-accent-soft: #0b3340;
+  --bh-accent-ink: #93e7f1;
+  --bh-accent-2: #8b7cf6;
 
-  --bh-info: #60a5fa;
-  --bh-success: #34d399;
-  --bh-warning: #fbbf24;
-  --bh-danger: #f87171;
+  --bh-info: #6aaefc;
+  --bh-success: #3ddba5;
+  --bh-warning: #fcc545;
+  --bh-danger: #fb7e7e;
+
+  /* Larger, calmer type scale: the command center is read on a projector
+   * as often as on a laptop, so nothing drops below 12px. */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.25rem;
+  --text-sm: 0.9375rem;
+  --text-sm--line-height: 1.45rem;
+  --text-base: 1.0625rem;
+  --text-base--line-height: 1.65rem;
+  --text-lg: 1.1875rem;
+  --text-xl: 1.3125rem;
+  --text-2xl: 1.625rem;
+  --text-3xl: 2rem;
+  --spacing: 0.265rem;
 
   background: var(--bh-bg);
   color: var(--bh-ink);
   color-scheme: dark;
 
   background-image:
-    linear-gradient(to right, color-mix(in srgb, var(--bh-ink) 3.5%, transparent) 1px, transparent 1px),
-    linear-gradient(to bottom, color-mix(in srgb, var(--bh-ink) 3.5%, transparent) 1px, transparent 1px);
-  background-size: 32px 32px;
+    radial-gradient(60rem 36rem at 12% -8%, color-mix(in srgb, var(--bh-accent) 13%, transparent), transparent 70%),
+    radial-gradient(52rem 34rem at 96% 4%, color-mix(in srgb, var(--bh-accent-2) 12%, transparent), transparent 70%),
+    linear-gradient(to right, color-mix(in srgb, var(--bh-ink) 2.2%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--bh-ink) 2.2%, transparent) 1px, transparent 1px);
+  background-size: auto, auto, 40px 40px, 40px 40px;
+  background-attachment: fixed;
+}
+
+/* Legacy fixed pixel sizes inside the command center, lifted to readable. */
+.command-theme .text-\[8px\] { font-size: 9.5px; }
+.command-theme .text-\[9px\] { font-size: 11px; }
+.command-theme .text-\[10px\] { font-size: 12px; }
+.command-theme .text-\[11px\] { font-size: 12.5px; }
+.command-theme .tracking-\[0\.24em\],
+.command-theme .tracking-\[0\.2em\] { letter-spacing: 0.13em; }
+.command-theme .tracking-widest { letter-spacing: 0.12em; }
+
+/* Cards: a faint top highlight and a soft lift on hover. */
+.command-theme .bh-card {
+  background-image: linear-gradient(180deg, color-mix(in srgb, var(--bh-ink) 3%, transparent), transparent 40%);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--bh-ink) 6%, transparent),
+    0 10px 30px -12px rgb(0 0 0 / 0.55);
+}
+.bh-card-hover {
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.bh-card-hover:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--bh-accent) 45%, var(--bh-line));
+  box-shadow: 0 16px 40px -16px color-mix(in srgb, var(--bh-accent) 35%, transparent);
+}
+
+.bh-gradient-text {
+  background: linear-gradient(100deg, var(--bh-accent-strong), var(--bh-accent-2) 70%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.bh-gradient-bar {
+  background: linear-gradient(90deg, var(--bh-accent), var(--bh-accent-2));
+}
+.bh-gradient-bar-v {
+  background: linear-gradient(0deg, var(--bh-accent), var(--bh-accent-2));
+}
+.bh-gradient-border {
+  border: 1px solid transparent;
+  background:
+    linear-gradient(var(--bh-surface), var(--bh-surface)) padding-box,
+    linear-gradient(120deg, color-mix(in srgb, var(--bh-accent) 70%, transparent), color-mix(in srgb, var(--bh-accent-2) 70%, transparent)) border-box;
+}
+
+@keyframes bhPulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent); }
+  50% { box-shadow: 0 0 0 6px transparent; }
+}
+.bh-pulse {
+  animation: bhPulse 2s ease-in-out infinite;
 }
 
 .command-theme ::selection {
@@ -233,4 +303,27 @@ body {
     max-width: 100%;
     overflow-x: clip;
   }
+}
+
+/* Printing a command-center page (postmortems): clean, light, paper-friendly. */
+@media print {
+  .command-theme {
+    --bh-bg: #ffffff;
+    --bh-surface: #ffffff;
+    --bh-surface-2: #f3f5f8;
+    --bh-ink: #111827;
+    --bh-muted: #374151;
+    --bh-faint: #6b7280;
+    --bh-line: #d9dee5;
+    --bh-accent-soft: #e6f7fa;
+    --bh-accent-ink: #0e7490;
+    --bh-success: #047857;
+    --bh-warning: #b45309;
+    --bh-danger: #b91c1c;
+    --bh-info: #1d4ed8;
+    background: #fff !important;
+  }
+  .command-theme .bh-card { box-shadow: none; background-image: none; }
+  .command-theme .bh-gradient-text { color: #0e7490; background: none; }
+  .command-hero-glow { display: none; }
 }

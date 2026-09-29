@@ -152,10 +152,10 @@ export function LearningClient() {
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-xs font-medium uppercase tracking-widest text-bh-faint">
+          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-bh-accent-ink">
             Phase 10 · Learning Loop
           </p>
-          <h1 className="mt-1 text-2xl font-bold tracking-tight text-bh-ink">Learning</h1>
+          <h1 className="mt-1.5 text-3xl font-bold tracking-tight text-bh-ink sm:text-4xl">Learning</h1>
           <p className="mt-1 text-sm text-bh-muted">
             Repair memory, RL experience, reward policy and evaluation — all derived from the
             persisted audit trail.
@@ -267,7 +267,7 @@ export function LearningClient() {
         <section aria-label="RL decision policy evaluation">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-xs font-medium uppercase tracking-widest text-bh-faint">
+              <p className="text-sm font-semibold uppercase tracking-[0.16em] text-bh-accent-ink">
                 RL Decision Policy · before → after
               </p>
               <h2 className="mt-1 text-lg font-bold tracking-tight text-bh-ink">

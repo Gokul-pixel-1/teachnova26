@@ -88,39 +88,39 @@ export async function POST(request: Request) {
 }
 
 export async function GET(request: Request) {
-  const currentUser = await getSessionUser()
-
-  const url = new URL(request.url)
-
-  const author =
-    url.searchParams.get('author')?.trim().toLowerCase() || null
-
-  const page = Math.max(
-    1,
-    parseInt(
-      url.searchParams.get('page') ?? '1',
-      10,
-    ) || 1,
-  )
-
-  const pageSize = Math.min(
-    MAX_PAGE_SIZE,
-    Math.max(
-      1,
-      parseInt(
-        url.searchParams.get('pageSize') ??
-          String(DEFAULT_PAGE_SIZE),
-        10,
-      ) || DEFAULT_PAGE_SIZE,
-    ),
-  )
-
   try {
     // MEDIUM-02 (runtime fault, MEDIUM risk): only while activated from the
     // Command Center, the feed query fails (500) and the home feed cannot load.
     if (isFaultActive('MEDIUM-02')) {
-      throw new Error('Injected DB query failure')
+      throw new Error('MEDIUM-02: Injected DB query failure')
     }
+
+    const currentUser = await getSessionUser()
+
+    const url = new URL(request.url)
+
+    const author =
+      url.searchParams.get('author')?.trim().toLowerCase() || null
+
+    const page = Math.max(
+      1,
+      parseInt(
+        url.searchParams.get('page') ?? '1',
+        10,
+      ) || 1,
+    )
+
+    const pageSize = Math.min(
+      MAX_PAGE_SIZE,
+      Math.max(
+        1,
+        parseInt(
+          url.searchParams.get('pageSize') ??
+            String(DEFAULT_PAGE_SIZE),
+          10,
+        ) || DEFAULT_PAGE_SIZE,
+      ),
+    )
 
     const where = author
       ? { author: { username: author } }

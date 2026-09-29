@@ -167,7 +167,7 @@ export function IncidentDetailClient({ id }: { id: string }) {
         <div className="min-w-0">
           <BackLink />
           <div className="mt-3 flex flex-wrap items-center gap-2.5">
-            <h1 className="text-2xl font-bold tracking-tight text-bh-ink">{incident.title}</h1>
+            <h1 className="text-3xl font-bold tracking-tight text-bh-ink">{incident.title}</h1>
             <Pill tone={incident.severity === 'HIGH' || incident.severity === 'CRITICAL' ? 'danger' : 'warning'}>
               {incident.severity}
             </Pill>
@@ -181,18 +181,27 @@ export function IncidentDetailClient({ id }: { id: string }) {
           </p>
         </div>
         <div className="flex flex-col items-end gap-2">
-          <button
-            onClick={() => void handleDownload()}
-            disabled={downloading}
-            className="flex h-9 items-center gap-2 rounded-md bg-bh-accent px-3.5 text-sm font-medium text-white hover:bg-bh-accent-strong disabled:opacity-60"
-          >
-            {downloading ? (
-              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" aria-hidden="true" />
-            ) : (
-              <Icon name="download" size={15} />
-            )}
-            {downloading ? 'Generating…' : 'Download report (PDF)'}
-          </button>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Link
+              href={`/ai/incidents/${incident.id}/postmortem`}
+              className="flex h-9 items-center gap-2 rounded-md border border-bh-line bg-bh-surface px-3.5 text-sm font-medium text-bh-ink hover:border-bh-accent/60"
+            >
+              <Icon name="document" size={15} />
+              Postmortem
+            </Link>
+            <button
+              onClick={() => void handleDownload()}
+              disabled={downloading}
+              className="flex h-9 items-center gap-2 rounded-md bg-bh-accent px-3.5 text-sm font-medium text-white hover:bg-bh-accent-strong disabled:opacity-60"
+            >
+              {downloading ? (
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" aria-hidden="true" />
+              ) : (
+                <Icon name="download" size={15} />
+              )}
+              {downloading ? 'Generating…' : 'Download report (PDF)'}
+            </button>
+          </div>
           {downloadError && (
             <p className="text-xs text-bh-danger" role="alert">
               {downloadError}
@@ -209,10 +218,7 @@ export function IncidentDetailClient({ id }: { id: string }) {
         </Card>
       )}
 
-      <Card className="p-4">
-        <p className="text-xs font-semibold uppercase tracking-wider text-bh-faint">Description</p>
-        <p className="mt-1.5 text-sm leading-relaxed text-bh-ink">{incident.description}</p>
-      </Card>
+      <DescriptionCard description={incident.description} />
 
       {/* Metadata */}
       <Card className="p-4">
@@ -829,6 +835,31 @@ function AgentRunRow({ run }: { run: AgentRunDTO }) {
         </p>
       )}
     </div>
+  )
+}
+
+// The description embeds the raw stack trace; show the readable part and
+// tuck the trace into a collapsible, scrollable code block.
+function DescriptionCard({ description }: { description: string }) {
+  const at = description.indexOf('Stack trace:')
+  const text = at === -1 ? description : description.slice(0, at).trim()
+  const stack = at === -1 ? null : description.slice(at + 'Stack trace:'.length).trim().replace(/\s+at /g, '\n    at ')
+  return (
+    <Card className="p-5">
+      <p className="text-xs font-semibold uppercase tracking-wider text-bh-faint">Description</p>
+      <p className="mt-2 text-base leading-relaxed text-bh-ink">{text}</p>
+      {stack && (
+        <details className="group mt-3">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-bh-accent-ink hover:underline">
+            <Icon name="chevronDown" size={15} className="transition-transform group-open:rotate-180" />
+            Stack trace
+          </summary>
+          <pre className="mt-2 max-h-72 overflow-auto rounded-xl border border-bh-line bg-bh-bg/60 p-4 font-mono text-xs leading-relaxed whitespace-pre-wrap text-bh-muted">
+            {stack}
+          </pre>
+        </details>
+      )}
+    </Card>
   )
 }
 

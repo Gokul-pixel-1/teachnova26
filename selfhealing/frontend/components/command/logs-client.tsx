@@ -60,10 +60,10 @@ export function LogsClient() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-xs font-medium uppercase tracking-widest text-bh-faint">
+          <p className="text-sm font-semibold uppercase tracking-[0.16em] text-bh-accent-ink">
             Mission Control
           </p>
-          <h1 className="mt-1 text-2xl font-bold tracking-tight text-bh-ink">Live Logs</h1>
+          <h1 className="mt-1.5 text-3xl font-bold tracking-tight text-bh-ink sm:text-4xl">Live Logs</h1>
           <p className="mt-1 text-sm text-bh-muted">
             structured observability stream · request IDs correlate end-to-end
           </p>
@@ -71,7 +71,7 @@ export function LogsClient() {
       </div>
 
       {/* Filters */}
-      <div className="grid grid-cols-1 gap-2 rounded-lg border border-bh-line bg-bh-surface p-3 sm:grid-cols-2 lg:grid-cols-6">
+      <div className="grid grid-cols-1 gap-2 rounded-lg border border-bh-line bg-bh-surface p-3 sm:grid-cols-2 lg:grid-cols-7">
         <label className="flex items-center gap-2 sm:col-span-2 lg:col-span-2">
           <span className="sr-only">Search message text</span>
           <input
@@ -133,7 +133,7 @@ export function LogsClient() {
             className="h-9 w-full rounded-md border border-bh-line bg-bh-surface-2 px-2.5 text-sm text-bh-ink placeholder:text-bh-faint"
           />
         </label>
-        <div className="flex gap-2">
+        <div className="flex gap-2 lg:col-span-2">
           <label className="min-w-0 flex-1">
             <span className="sr-only">HTTP status</span>
             <input
